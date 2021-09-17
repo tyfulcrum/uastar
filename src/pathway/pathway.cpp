@@ -1,10 +1,12 @@
 #include <bitmap_image.hpp>
 
 #include "pathway/pathway.hpp"
-#include "pathway/input/custom.hpp"
-#include "pathway/input/zigzag.hpp"
+// #include "pathway/input/custom.hpp"
+// #include "pathway/input/zigzag.hpp"
+#include "pathway/input/threedim.hpp"
 #include "pathway/CPU-solver.hpp"
 #include "pathway/GPU-solver.hpp"
+#include <fmt/core.h>
 
 static void drawPixel(
     bitmap_image &image, int pixel_size,
@@ -26,8 +28,9 @@ Pathway::Pathway()
 
     m_width = vm_options["width"].as<int>();
     m_height = vm_options["height"].as<int>();
+    m_layer = vm_options["layer"].as<int>();
     m_inputModule = vm_options["input-module"].as<string>();
-    m_size = m_width * m_height;
+    m_size = m_width * m_height * m_layer;
     cpuSolver = new CPUPathwaySolver(this);
     gpuSolver = new GPUPathwaySolver(this);
     cpuSolved = false;
@@ -50,12 +53,18 @@ string Pathway::problemName() const
 void Pathway::prepare()
 {
     m_graph.resize(m_size);
+    /*
     if (m_inputModule == "custom") {
         CustomPathwayInput input(m_height, m_width);
         generateGraph(input);
+        printGraph();
     } else if (m_inputModule == "zigzag") {
         ZigzagPathwayInput input(m_height, m_width);
         generateGraph(input);
+    } else */ if (m_inputModule == "threedim") {
+      ThreedimPathwayInput input(m_height, m_width, m_layer);
+      generateGraph(input);
+      printGraph();
     } else {
         cout << "Please set your input-module parameter correctly." << endl
             << "=================================================" << endl
@@ -127,6 +136,31 @@ bool Pathway::output()
     }
 
     return true;
+}
+
+void Pathway::printGraph(void) {
+  fmt::print("From: ({}, {}, {}) to ({}, {}, {})\n", \
+      m_sx, m_sy, m_sz, \
+      m_ex, m_ey, m_ez);
+  cout << endl << "Graph: " << endl;
+  for (int i = 0; i < layer(); ++i) {
+    for (int j = 0; j < height(); ++j) {
+      for (int k = 0; k < width(); ++k) {
+        cout << unsigned(m_graph[toID(j, k, i)]) << " ";
+      }
+      cout << endl;
+    }
+    cout << endl;
+  }
+}
+
+void Pathway::generateGraph(ThreedimPathwayInput &input)
+{
+    m_graph.clear();
+    m_graph.resize(width() * height() * layer());
+    input.generate(m_graph.data());
+    input.getStartPoint(&m_sx, &m_sy, &m_sz);
+    input.getEndPoint(&m_ex, &m_ey, &m_ez);
 }
 
 void Pathway::generateGraph(PathwayInput &input)

@@ -3,6 +3,7 @@
 
 #include "problem.hpp"
 #include "pathway/input.hpp"
+#include "pathway/input/threedim.hpp"
 
 class CPUPathwaySolver;
 class GPUPathwaySolver;
@@ -31,8 +32,13 @@ public:
     bool inrange(int x, int y) const;
     const uint8_t *graph() const;
 
+    int layer(void) const;
+    int toID(const int x, const int y, const int z) const;
+    void toXYZ(const int id, int *x, int *y, int *z) const;
 private:
+    void printGraph(void);
     void generateGraph(PathwayInput &input);
+    void generateGraph(ThreedimPathwayInput &input);
     void printSolution(const vector<int> &pathList,
                        const string filename) const;
     void plotSolution(const vector<int> &pathList,
@@ -40,11 +46,14 @@ private:
 
     int m_sx;
     int m_sy;
+    int m_sz;
     int m_ex;
     int m_ey;
+    int m_ez;
     int m_size;
     int m_width;
     int m_height;
+    int m_layer;
     string m_inputModule;
     vector<uint8_t> m_graph;
     CPUPathwaySolver *cpuSolver;
@@ -101,6 +110,7 @@ inline int Pathway::toID(int x, int y) const
     return x * width() + y;
 }
 
+
 inline void Pathway::toXY(int id, int *x, int *y) const
 {
     *x = id / width();
@@ -116,6 +126,23 @@ inline bool Pathway::inrange(int x, int y) const
 inline const uint8_t *Pathway::graph() const
 {
     return m_graph.data();
+}
+
+inline int Pathway::layer(void) const {
+  return m_layer;
+}
+
+inline int Pathway::toID(const int x, const int y, const int z) const
+{
+    return z * width() * height() + x * width() + y;
+}
+
+inline void Pathway::toXYZ(const int id, int *x, int *y, int *z) const
+{
+  int bias = id / layer();
+    *x = (id - bias) / width();
+    *y = (id - bias) % width();
+    *z = bias;
 }
 
 #endif

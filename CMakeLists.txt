@@ -3,11 +3,14 @@ project(uastar)
 
 find_package(CUDA REQUIRED)
 find_package(Boost COMPONENTS program_options system filesystem REQUIRED)
+find_package(fmt)
 
 add_definitions("-std=c++1y")
-set(CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG} -lineinfo -gencode arch=compute_35,code=sm_35 --ptxas-options -v )
+set(CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG} -lineinfo --ptxas-options -v )
+# set(CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG} -lineinfo -gencode arch=compute_75,code=sm_75 --ptxas-options -v )
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -rdynamic -Wall -DDEBUG -fsanitize=address")
-set(CUDA_NVCC_FLAGS_RELEASE ${CUDA_NVCC_FLAGS_RELEASE} -O2 -gencode arch=compute_35,code=sm_35 --ptxas-options -v)
+set(CUDA_NVCC_FLAGS_RELEASE ${CUDA_NVCC_FLAGS_RELEASE} -O2 --ptxas-options -v)
+# set(CUDA_NVCC_FLAGS_RELEASE ${CUDA_NVCC_FLAGS_RELEASE} -O2 -gencode arch=compute_75,code=sm_75 --ptxas-options -v)
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2")
 
 include_directories(libs/moderngpu/include)
@@ -30,6 +33,7 @@ cuda_add_executable(
     src/pathway/GPU-solver.cu
     src/pathway/input/custom.cpp
     src/pathway/input/zigzag.cpp
+    src/pathway/input/threedim.cpp
     src/puzzle/puzzle.cu
     src/puzzle/database.cpp
     ${moderngpu_source}
@@ -44,4 +48,5 @@ cuda_add_executable(
 target_link_libraries(
     uastar
     ${Boost_LIBRARIES}
+    fmt::fmt
 )

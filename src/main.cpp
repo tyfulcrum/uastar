@@ -68,6 +68,7 @@ static void solve_problem(Problem &problem)
          << endl;
     problem.prepare();
 
+    /*
     if (use_cpu) {
         cout << time_pass(start_time)
             << " Initializing CPU data structure ......"
@@ -104,9 +105,10 @@ static void solve_problem(Problem &problem)
             cout << time_pass(start_time)
                  << " ERROR: Output of the CPU and GPU is not consistent!"
                  << endl;
-            exit(1);
+            // exit(1);
         }
     }
+    */
 }
 
 int main(int argc, char *argv[])
@@ -120,6 +122,7 @@ int main(int argc, char *argv[])
         ("puzzle", "Solve tile puzzle problem")
         ("height,H", po::value<int>(), "Width of the problem pathway")
         ("width,W", po::value<int>(), "Height of the problem pathway")
+        ("layer,L", po::value<int>(), "Layer of the problem pathway")
         ("input-module", po::value<string>()->default_value("custom"),
          "Choose how to generate the input data.\n"
          "For pathway finding:\n"
