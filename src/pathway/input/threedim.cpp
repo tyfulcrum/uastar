@@ -25,7 +25,7 @@ void ThreedimPathwayInput::generate(uint8_t graph[])
           *buf++ = t ? 0xFF : 0;
         }
       }
-      cout << endl << "======" << endl;
+      // cout << endl << "======" << endl;
     }
 }
 

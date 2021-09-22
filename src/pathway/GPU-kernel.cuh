@@ -84,6 +84,31 @@ __constant__ int d_targetY;
 __constant__ uint32_t d_targetID;
 __constant__ uint32_t d_modules[10];
 
+__constant__ int d_layer;
+__constant__ int d_targetZ;
+
+inline __device__ int xyzToID(const int x, const int y, const int z)
+{
+  int plane_size = d_width * d_height;
+    return z * plane_size + x * d_width + y;
+}
+
+inline __device__ void idToXYZ(const uint32_t id, int &x, int &y, int &z) {
+  int plane_size = d_width * d_height;
+  int bias = id % plane_size;
+  x = bias / d_width;
+  y = bias % d_width;
+  z = id / plane_size;
+}
+
+inline __device__ void idToXYZ(const uint32_t nodeID, int *x, int *y, int *z)
+{
+  u_int32_t bias = nodeID / d_layer;
+    *x = (nodeID - bias) / d_width;
+    *y = (nodeID - bias) % d_width;
+    *z = bias;
+}
+
 inline __device__ void idToXY(uint32_t nodeID, int *x, int *y)
 {
     *x = nodeID / d_width;
@@ -109,6 +134,28 @@ inline __device__ float computeHValue(uint32_t nodeID)
     return computeHValue(x, y);
 }
 
+inline __device__ float computeHValue(const int x, const int y, const int z)
+{
+    int dx = abs(d_targetX - x);
+    int dy = abs(d_targetY - y);
+    int dz = abs(d_targetZ - z);
+    return (float) dx + dy + dz;
+}
+
+inline __device__ float computeHValue3D(uint32_t nodeID)
+{
+    int x, y, z;
+    idToXYZ(nodeID, x, y, z);
+    return computeHValue(x, y, z);
+}
+
+
+inline __device__ float inrange(const int x, const int y, const int z)
+{
+    return 0 <= x && x < d_height && 0 <= y && y < d_width && \
+                0 <= z && z < d_layer;
+}
+
 inline __device__ float inrange(int x, int y)
 {
     return 0 <= x && x < d_height && 0 <= y && y < d_width;
@@ -117,16 +164,20 @@ inline __device__ float inrange(int x, int y)
 inline cudaError_t initializeCUDAConstantMemory(
     int height,
     int width,
+    int layer, 
     int targetX,
     int targetY,
+    int targetZ,
     uint32_t targetID
 )
 {
     cudaError_t ret = cudaSuccess;
     ret = cudaMemcpyToSymbol(d_height, &height, sizeof(int));
     ret = cudaMemcpyToSymbol(d_width, &width, sizeof(int));
+    ret = cudaMemcpyToSymbol(d_layer, &layer, sizeof(int));
     ret = cudaMemcpyToSymbol(d_targetX, &targetX, sizeof(int));
     ret = cudaMemcpyToSymbol(d_targetY, &targetY, sizeof(int));
+    ret = cudaMemcpyToSymbol(d_targetZ, &targetZ, sizeof(int));
     ret = cudaMemcpyToSymbol(d_targetID, &targetID, sizeof(uint32_t));
     return ret;
 }
@@ -144,14 +195,15 @@ __global__ void kInitialize(
     heap_t g_openList[],
     int g_heapSize[],
     int startX,
-    int startY
+    int startY, 
+    int startZ
 )
 {
     node_t node;
-    node.fValue = computeHValue(startX, startY);
+    node.fValue = computeHValue(startX, startY, startZ);
     node.gValue = 0;
     node.prev = UINT32_MAX;
-    node.nodeID = xyToID(startX, startY);
+    node.nodeID = xyzToID(startX, startY, startZ);
 
     heap_t heap;
     heap.fValue = node.fValue;
@@ -251,20 +303,23 @@ __global__ void kExtractExpand(
     }
     g_heapSize[gid] = heapSize;
 
-    int sortListCount = 0;
-    sort_t sortList[VT*8];
-    int prevList[VT*8];
-    bool valid[VT*8];
+    const int DIM = 6;
 
-    const int DX[8] = { 1,  1, -1, -1,  1, -1,  0,  0 };
-    const int DY[8] = { 1, -1,  1, -1,  0,  0,  1, -1 };
-    const float COST[8] = { SQRT2, SQRT2, SQRT2, SQRT2, 1, 1, 1, 1 };
+    int sortListCount = 0;
+    sort_t sortList[VT*DIM];
+    int prevList[VT*DIM];
+    bool valid[VT*DIM];
+
+    const int DX[DIM] = { 1, -1, 0,  0, 0, 0 };
+    const int DY[DIM] = { 0,  0, 1, -1, 0, 0 };
+    const int DZ[DIM] = { 0,  0, 0, 0, 1, -1 };
+    const float COST[DIM] = { 1, 1, 1, 1, 1, 1 };
 
 #pragma unroll
     for (int k = 0; k < VT; ++k) {
 #pragma unroll
-        for (int i = 0; i < 8; ++i)
-            valid[k*8 + i] = false;
+        for (int i = 0; i < DIM; ++i)
+            valid[k*DIM + i] = false;
 
         if (k >= popCount)
             continue;
@@ -282,21 +337,22 @@ __global__ void kExtractExpand(
             continue;
         }
 
-        int x, y;
-        idToXY(node.nodeID, &x, &y);
+        int x, y, z;
+        idToXYZ(node.nodeID, x, y, z);
 #pragma unroll
-        for (int i = 0; i < 8; ++i) {
+        for (int i = 0; i < DIM; ++i) {
             if (~g_graph[node.nodeID] & (1 << i))
                 continue;
 
             int nx = x + DX[i];
             int ny = y + DY[i];
-            int index = k*8 + i;
-            if (inrange(nx, ny)) {
-                uint32_t nodeID = xyToID(nx, ny);
+            int nz = z + DZ[i];
+            int index = k*DIM + i;
+            if (inrange(nx, ny, nz)) {
+                uint32_t nodeID = xyzToID(nx, ny, nz);
 #ifdef KERNEL_LOG
-                int px, py;
-                idToXY(node.nodeID, &px, &py);
+                int px, py, pz;
+                idToXYZ(node.nodeID, px, py, pz);
                 printf("\t\t\t[%d]: Expand (%d, %d) from (%d, %d)\n",
                        gid, nx, ny, px, py);
 #endif
@@ -318,7 +374,7 @@ __global__ void kExtractExpand(
     sortListIndex += s_sortListBase;
 
 #pragma unroll
-    for (int k = 0; k < VT*8; ++k)
+    for (int k = 0; k < VT*DIM; ++k)
         if (valid[k]) {
             g_sortList[sortListIndex] = sortList[k];
             g_prevList[sortListIndex] = prevList[k];
@@ -441,7 +497,7 @@ __global__ void kDeduplicate(
         node.nodeID = g_sortList[gid].nodeID;
         node.gValue = g_sortList[gid].gValue;
         node.prev   = g_prevList[gid];
-        node.fValue = node.gValue + computeHValue(node.nodeID);
+        node.fValue = node.gValue + computeHValue3D(node.nodeID);
 
         // cudaAssert((int)node.nodeID >= 0);
         addr = g_hash[node.nodeID];

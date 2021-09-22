@@ -22,8 +22,10 @@ public:
 
     int sx() const;
     int sy() const;
+    int sz() const;
     int ex() const;
     int ey() const;
+    int ez() const;
     int size() const;
     int width() const;
     int height() const;
@@ -35,6 +37,8 @@ public:
     int layer(void) const;
     int toID(const int x, const int y, const int z) const;
     void toXYZ(const int id, int *x, int *y, int *z) const;
+    void toXYZ(const int id, int &x, int &y, int &z) const;
+    bool inrange(const int x, const int y, const int z) const;
 private:
     void printGraph(void);
     void generateGraph(PathwayInput &input);
@@ -80,6 +84,11 @@ inline int Pathway::sy() const
     return m_sy;
 }
 
+inline int Pathway::sz() const
+{
+    return m_sz;
+}
+
 inline int Pathway::ex() const
 {
     return m_ex;
@@ -88,6 +97,11 @@ inline int Pathway::ex() const
 inline int Pathway::ey() const
 {
     return m_ey;
+}
+
+inline int Pathway::ez() const
+{
+    return m_ez;
 }
 
 inline int Pathway::size() const
@@ -137,12 +151,27 @@ inline int Pathway::toID(const int x, const int y, const int z) const
     return z * width() * height() + x * width() + y;
 }
 
+inline void Pathway::toXYZ(const int id, int &x, int &y, int &z) const
+{
+  int plane_size = width() * height();
+  int bias = id % plane_size;
+  x = bias / width();
+  y = bias % width();
+  z = id / plane_size;
+}
+
 inline void Pathway::toXYZ(const int id, int *x, int *y, int *z) const
 {
   int bias = id / layer();
     *x = (id - bias) / width();
     *y = (id - bias) % width();
     *z = bias;
+}
+
+inline bool Pathway::inrange(const int x, const int y, const int z) const
+{
+    return 0 <= x && x < height() && 0 <= y && y < width() && \
+                0 <= z && z < layer();
 }
 
 #endif

@@ -68,7 +68,6 @@ static void solve_problem(Problem &problem)
          << endl;
     problem.prepare();
 
-    /*
     if (use_cpu) {
         cout << time_pass(start_time)
             << " Initializing CPU data structure ......"
@@ -108,7 +107,6 @@ static void solve_problem(Problem &problem)
             // exit(1);
         }
     }
-    */
 }
 
 int main(int argc, char *argv[])

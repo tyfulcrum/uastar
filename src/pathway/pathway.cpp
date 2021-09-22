@@ -64,7 +64,7 @@ void Pathway::prepare()
     } else */ if (m_inputModule == "threedim") {
       ThreedimPathwayInput input(m_height, m_width, m_layer);
       generateGraph(input);
-      printGraph();
+      // printGraph();
     } else {
         cout << "Please set your input-module parameter correctly." << endl
             << "=================================================" << endl
@@ -93,6 +93,7 @@ void Pathway::gpuSolve()
 {
     gpuSuccessful = gpuSolver->solve();
     gpuSolved = true;
+    fmt::print("GPU sovled: {}\n", gpuSuccessful);
 }
 
 bool Pathway::output()
@@ -122,13 +123,13 @@ bool Pathway::output()
 
     if (cpuSuccessful) {
         printf(" > Optimal distance from CPU: %.3f\n", cpuOptimal);
-        plotSolution(cpuSolution, "pathwayCPU.bmp");
+        // plotSolution(cpuSolution, "pathwayCPU.bmp");
     }
     if (gpuSuccessful) {
         printf(" > Optimal distance from GPU: %.3f\n", gpuOptimal);
-        plotSolution(gpuSolution, "pathwayGPU.bmp");
+        // plotSolution(gpuSolution, "pathwayGPU.bmp");
     }
-    plotSolution(vector<int>(), "pathway.bmp");
+    // plotSolution(vector<int>(), "pathway.bmp");
 
     if (cpuSolved && gpuSolved) {
         if (!float_equal(cpuOptimal, gpuOptimal))
@@ -182,7 +183,7 @@ void Pathway::printSolution(const vector<int> &pathList,
         return;
     }
 
-    int px, py;
+    int px, py, pz;
     int count = 0;
     int count1 = 0;
     int count2 = 0;
@@ -192,15 +193,16 @@ void Pathway::printSolution(const vector<int> &pathList,
         if (++count % 6 == 0) {
             fprintf(fout, "\n\t");
         }
-        int x, y;
-        toXY(v, &x, &y);
+        int x, y, z;
+        toXYZ(v, x, y, z);
         if (abs(px-x) + abs(py-y) == 2)
             count2++;
         else
             count1++;
         px = x;
         py = y;
-        fprintf(fout, "(%d %d)", x, y);
+        pz = z;
+        fprintf(fout, "(%d %d %d)", x, y, z);
     }
 
     printf(" > Number of -: %d, +: %d\n", count1, count2);

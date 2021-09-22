@@ -96,8 +96,8 @@ void GPUPathwaySolver::initialize()
     d->context = CreateCudaDevice(vm_options["ordinal"].as<int>());
 
     initializeCUDAConstantMemory(
-        p->height(), p->width(), p->ex(), p->ey(),
-        (uint32_t)p->toID(p->ex(), p->ey()));
+        p->height(), p->width(), p->layer(), p->ex(), p->ey(), p->ez(), 
+        (uint32_t)p->toID(p->ex(), p->ey(), p->ez()));
 
     d->graph = d->context->Malloc<uint8_t>(p->graph(), p->size());
 
@@ -134,7 +134,8 @@ void GPUPathwaySolver::initialize()
         *d->openList,
         *d->heapSize,
         p->sx(),
-        p->sy()
+        p->sy(), 
+        p->sz()
     );
     dout << "\t\tGPU Initialization finishes" << endl;
 }

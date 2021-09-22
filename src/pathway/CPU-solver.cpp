@@ -3,6 +3,11 @@
 #include <queue>
 #include <unordered_set>
 #include <unordered_map>
+#include <fmt/core.h>
+#include <array>
+#include <algorithm>
+
+using namespace std;
 
 struct node_t {
     int id;
@@ -35,16 +40,27 @@ void CPUPathwaySolver::initialize()
     openList = decltype(openList)();
     closeList.clear();
 
-    targetID = p->toID(p->ex(), p->ey());
+    targetID = p->toID(p->ex(), p->ey(), p->ez());
 
-    int startID = p->toID(p->sx(), p->sy());
+    int startID = p->toID(p->sx(), p->sy(), p->sz());
     node_t *startNode = new node_t(startID, 0, nullptr);
     openList.push(make_pair(computeFValue(startNode), startNode));
     globalList[startNode->id] = startNode;
+    /*
+    fmt::print("startID: {}, targetID: {}", startID, targetID);
+    int tx, ty, tz;
+    p->toXYZ(targetID, tx, ty, tz);
+    fmt::print("targetID: ({}, {}, {})\n", tx, ty, tz);
+    */
 }
 
 bool CPUPathwaySolver::solve()
 {
+  const int DIM = 6;
+  const array<int, DIM> DX = { 0,  0,  1,  1, 0, 0 };
+  const array<int, DIM> DY = { 1, -1,  0, 0, 0, 0 };
+  const array<int, DIM> DZ = { 0, 0, 0, 0, 1, -1 };
+  const array<int, DIM> COST = { 1, 1, 1, 1, 1, 1 };
     while (!openList.empty()) {
         node_t *node;
         do {
@@ -58,16 +74,18 @@ bool CPUPathwaySolver::solve()
             return true;
         }
 
-        int x, y;
-        p->toXY(node->id, &x, &y);
+        int x, y, z;
+        p->toXYZ(node->id, x, y, z);
         dout << "(" << x << ", " << y << ")" << endl;
-        for (int i = 0; i < 8; ++i) {
+        // fmt::print("({}, {}, {}) ", x, y, z);
+        for (int i = 0; i < DIM; ++i) {
             if (~p->graph()[node->id] & 1 << i)
                 continue;
             int nx = x + DX[i];
             int ny = y + DY[i];
-            if (p->inrange(nx, ny)) {
-                int nid = p->toID(nx, ny);
+            int nz = z + DZ[i];
+            if (p->inrange(nx, ny, nz)) {
+                int nid = p->toID(nx, ny, nz);
                 float dist = node->dist + COST[i];
                 if (globalList.count(nid) == 0) {
                     node_t *nnode = new node_t(nid, dist, node);
@@ -104,9 +122,10 @@ void CPUPathwaySolver::getSolution(float *optimal, vector<int> *pathList)
 
 float CPUPathwaySolver::computeFValue(node_t *node)
 {
-    int x, y;
-    p->toXY(node->id, &x, &y);
+    int x, y, z;
+    p->toXYZ(node->id, x, y, z);
     int dx = abs(x - p->ex());
     int dy = abs(y - p->ey());
-    return node->dist + min(dx, dy)*SQRT2 + abs(dx-dy);
+    int dz = abs(z - p->ez());
+    return (float) dx + dy + dz;
 }
