@@ -1,3 +1,4 @@
+#include <vector>
 #define NO_CPP11
 
 #include <iostream>
@@ -6,8 +7,13 @@
 
 #include "pathway/GPU-solver.hpp"
 #include "pathway/GPU-kernel.cuh"
+#include "utils.hpp"
+
+bool debug = false;
 
 using namespace mgpu;
+
+using thrust::raw_pointer_cast;
 
 int div_up(int x, int y) { return (x-1) / y + 1; }
 
@@ -59,8 +65,7 @@ struct DeviceData {
 };
 
 
-GPUPathwaySolver::GPUPathwaySolver(Pathway *pathway)
-    : p(pathway)
+GPUPathwaySolver::GPUPathwaySolver()
 {
     d = new DeviceData();
 }
@@ -88,13 +93,59 @@ GPUPathwaySolver::~GPUPathwaySolver()
 
 }
 
-void GPUPathwaySolver::initialize()
+int GPUPathwaySolver::gpuKnows(int x, int y, int z) {
+  int res = false;
+  device_vector<int> resvec;
+  resvec.push_back(0);
+  auto vec_data_ptr = thrust::raw_pointer_cast(&rd.zDirs[0]);
+  auto resvec_ptr = thrust::raw_pointer_cast(&resvec[0]);
+  read_bool_vec<<<1, 1>>>(resvec_ptr, x, y, z);
+  res = resvec[0];
+  return res;
+}
+bool GPUPathwaySolver::testhasEdge(int x, int y, int z, frDirEnum dir) {
+  bool res = false;
+  device_vector<bool> resvec;
+  resvec.push_back(false);
+  auto res_ptr = thrust::raw_pointer_cast(&resvec[0]);
+  hasEdge_test<<<1, 1>>>(res_ptr, x, y, z, dir);
+  res = resvec[0];
+  return res;
+}
+
+frDirEnum GPUPathwaySolver::testDir(int x, int y, int z) {
+  frDirEnum res = frDirEnum::UNKNOWN;
+  device_vector<frDirEnum> resvec;
+  resvec.push_back(res);
+  auto res_ptr = thrust::raw_pointer_cast(&resvec[0]);
+  test_Dir<<<1, 1>>>(res_ptr, x, y, z);
+  res = resvec[0];
+  return res;
+}
+void GPUPathwaySolver::initialize(const vector<unsigned long long> &bits, 
+    const bovec &prevDirs, const bovec &srcs, 
+        const bovec &guides, const bovec &zDirs, int x, int y, int z)
 {
     cudaDeviceSynchronize();
     cudaDeviceReset();
 
-    d->context = CreateCudaDevice(vm_options["ordinal"].as<int>());
+    d->context = CreateCudaDevice(0);
 
+    rd.bits = bits;
+    rd.prevDirs = prevDirs;
+    rd.srcs = srcs;
+    rd.guides = guides;
+    rd.zDirs = zDirs;
+
+
+    auto bits_ptr = thrust::raw_pointer_cast(&rd.bits[0]);
+    auto prevDirs_ptr = raw_pointer_cast(&rd.prevDirs[0]);
+    auto srcs_ptr = thrust::raw_pointer_cast(&rd.srcs[0]);
+    auto guides_ptr = raw_pointer_cast(&rd.guides[0]);
+    auto zdirs_ptr = thrust::raw_pointer_cast(&rd.zDirs[0]);
+    initializeDevicePointers(bits_ptr, prevDirs_ptr, srcs_ptr, guides_ptr, zdirs_ptr, x, y, z);
+
+    /*
     initializeCUDAConstantMemory(
         p->height(), p->width(), p->layer(), p->ex(), p->ey(), p->ez(), 
         (uint32_t)p->toID(p->ex(), p->ey(), p->ez()));
@@ -138,6 +189,7 @@ void GPUPathwaySolver::initialize()
         p->sz()
     );
     dout << "\t\tGPU Initialization finishes" << endl;
+        */
 }
 
 bool GPUPathwaySolver::solve()

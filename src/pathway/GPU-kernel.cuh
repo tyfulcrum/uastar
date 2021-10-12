@@ -8,6 +8,8 @@
 #include <moderngpu.cuh>
 
 #include "utils.hpp"
+#include <frCoreLangTypes.h>
+using namespace coret;
 
 // Suppose we only use x dimension
 #define THREAD_ID (threadIdx.x)
@@ -87,6 +89,12 @@ __constant__ uint32_t d_modules[10];
 __constant__ int d_layer;
 __constant__ int d_targetZ;
 
+__device__ unsigned long long *d_bits;
+__device__ bool *d_prevDirs;
+__device__ bool *d_srcs;
+__device__ bool *d_guides;
+__device__ bool *d_zDirs;
+
 inline __device__ int xyzToID(const int x, const int y, const int z)
 {
   int plane_size = d_width * d_height;
@@ -159,6 +167,142 @@ inline __device__ float inrange(const int x, const int y, const int z)
 inline __device__ float inrange(int x, int y)
 {
     return 0 <= x && x < d_height && 0 <= y && y < d_width;
+}
+
+inline __device__ bool getZDir(int in){
+  return d_zDirs[in];
+}
+inline __device__ frMIdx getIdx(frMIdx xIdx, frMIdx yIdx, frMIdx zIdx) {
+  return (getZDir(zIdx)) ? (xIdx + yIdx * d_height + zIdx * d_height * d_width): 
+    (yIdx + xIdx * d_width  + zIdx * d_height  * d_width);
+}
+
+__device__ void correct(frMIdx &x, frMIdx &y, frMIdx &z, frDirEnum &dir) {
+  switch (dir) {
+    case frDirEnum::W:
+      x--;
+      dir = frDirEnum::E;
+      break;
+    case frDirEnum::S:
+      y--;
+      dir = frDirEnum::N;
+      break;
+    case frDirEnum::D:
+      z--;
+      dir = frDirEnum::U;
+      break;
+    default:
+      ;
+  }
+  return;
+}
+
+inline __device__ bool isValid(frMIdx x, frMIdx y, frMIdx z) {
+  if (x < 0 || y < 0 || z < 0 ||
+      x >= (frMIdx)d_height || y >= (frMIdx)d_width || z >= (frMIdx)d_layer) {
+    return false;
+  } else {
+    return true;
+  }
+}
+inline __device__ bool getBit(frMIdx idx, frMIdx pos) {
+  return (d_bits[idx] >> pos ) & 1;
+}
+
+__device__ bool hasEdge(frMIdx x, frMIdx y, frMIdx z, frDirEnum dir) {
+  correct(x, y, z, dir);
+  if (isValid(x, y, z)) {
+    auto idx = getIdx(x, y, z);
+    printf("GPU getBit: %d\n", getBit(idx, 1));
+    switch (dir) {
+      case frDirEnum::E:
+        return getBit(idx, 0);
+      case frDirEnum::N:
+        return getBit(idx, 1);
+      case frDirEnum::U:
+        return getBit(idx, 2);
+      default:
+        return false;
+    }
+  } else {
+    return false;
+  }
+}
+__device__ void reverse(frMIdx &x, frMIdx &y, frMIdx &z, frDirEnum &dir) {
+  switch (dir) {
+    case frDirEnum::E:
+      x++;
+      dir = frDirEnum::W;
+      break;
+    case frDirEnum::S:
+      y--;
+      dir = frDirEnum::N;
+      break;
+    case frDirEnum::W:
+      x--;
+      dir = frDirEnum::E;
+      break;
+    case frDirEnum::N:
+      y++;
+      dir = frDirEnum::S;
+      break;
+    case frDirEnum::U:
+      z++;
+      dir = frDirEnum::D;
+      break;
+    case frDirEnum::D:
+      z--;
+      dir = frDirEnum::U;
+      break;
+    default:
+      ;
+  }
+  return;
+}
+
+__device__ bool hasGuide(frMIdx x, frMIdx y, frMIdx z, frDirEnum dir) {
+  reverse(x, y, z, dir);
+  auto idx = getIdx(x, y, z);
+  return d_guides[idx];
+}
+inline __device__ bool isSrc(frMIdx x, frMIdx y, frMIdx z) {
+  return d_srcs[getIdx(x, y, z)];
+}
+inline __device__ frDirEnum getPrevAstarNodeDir(frMIdx x, frMIdx y, frMIdx z) {
+  auto baseIdx = 3 * getIdx(x, y, z);
+  return (frDirEnum)(((unsigned short)(d_prevDirs[baseIdx]    ) << 2) + 
+      ((unsigned short)(d_prevDirs[baseIdx + 1]) << 1) + 
+      ((unsigned short)(d_prevDirs[baseIdx + 2]) << 0));
+}
+
+__global__ void hasEdge_test(bool *res, int x, int y, int z, frDirEnum dir) {
+  *res = hasGuide(x, y, z, dir);
+}
+
+__global__ void test_Dir(frDirEnum *res, int x, int y, int z) {
+  *res = getPrevAstarNodeDir(x, y, z);
+}
+
+__global__ void read_bool_vec(int *res, int x, int y, int z) {
+  // printf("\n GPU vec[%d] = %d\n", in, d_zDirs[in]);
+  *res = getIdx(x, y, z);
+}
+
+inline cudaError_t initializeDevicePointers(
+    unsigned long long *bits, bool *prevDirs, bool *srcs, bool *guides, bool *zDirs, 
+    int height, int width, int z
+)
+{
+    cudaError_t ret = cudaSuccess;
+    ret = cudaMemcpyToSymbol(d_bits, &bits, sizeof(unsigned long long*));
+    ret = cudaMemcpyToSymbol(d_prevDirs, &prevDirs, sizeof(bool*));
+    ret = cudaMemcpyToSymbol(d_srcs, &srcs, sizeof(bool*));
+    ret = cudaMemcpyToSymbol(d_guides, &guides, sizeof(bool*));
+    ret = cudaMemcpyToSymbol(d_zDirs, &zDirs, sizeof(bool*));
+    ret = cudaMemcpyToSymbol(d_height, &height, sizeof(int));
+    ret = cudaMemcpyToSymbol(d_width, &width, sizeof(int));
+    ret = cudaMemcpyToSymbol(d_layer, &z, sizeof(int));
+    return ret;
 }
 
 inline cudaError_t initializeCUDAConstantMemory(

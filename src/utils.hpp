@@ -44,12 +44,14 @@ using std::numeric_limits;
 
 using boost::lexical_cast;
 
+/*
 #ifndef NO_CPP11
 extern boost::mt19937 random_engine;
 #endif
 extern boost::program_options::variables_map vm_options;
 extern void help();
 extern bool debug;
+*/
 
 #ifndef DEBUG
 #  define DEBUG 0
