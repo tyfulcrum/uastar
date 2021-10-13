@@ -278,6 +278,39 @@ inline __device__ frDirEnum getPrevAstarNodeDir(frMIdx x, frMIdx y, frMIdx z) {
 __global__ void hasEdge_test(bool *res, int x, int y, int z, frDirEnum dir) {
   *res = hasGuide(x, y, z, dir);
 }
+__device__ bool isExpandable(int x, int y, int z, frDirEnum gdir) {
+  //bool enableOutput = true;
+  bool enableOutput = false;
+  frDirEnum dir = frDirEnum::S;
+  frMIdx gridX = x;
+  frMIdx gridY = y;
+  frMIdx gridZ = z;
+  bool hg = hasEdge(gridX, gridY, gridZ, dir);
+  printf("GPU hasEdge: %d\n", hg);
+  /*
+  if (enableOutput) {
+    if (!hasEdge(gridX, gridY, gridZ, dir)) {
+      cout <<"no edge@(" <<gridX <<", " <<gridY <<", " <<gridZ <<") " <<(int)dir <<endl;
+    }
+    if (hasEdge(gridX, gridY, gridZ, dir) && !hasGuide(gridX, gridY, gridZ, dir)) {
+      cout <<"no guide@(" <<gridX <<", " <<gridY <<", " <<gridZ <<") " <<(int)dir <<endl;
+    }
+  }
+  */
+  reverse(gridX, gridY, gridZ, dir);
+  if (!hg || 
+      isSrc(gridX, gridY, gridZ) || 
+      (getPrevAstarNodeDir(gridX, gridY, gridZ) != frDirEnum::UNKNOWN) || // comment out for non-buffer enablement
+      gdir == dir) {
+    return false;
+  } else {
+    return true;
+  }
+}
+
+__global__ void test_isex(bool *res, int x, int y, int z, frDirEnum dir) {
+  *res = isExpandable(x, y, z, dir);
+}
 
 __global__ void test_Dir(frDirEnum *res, int x, int y, int z) {
   *res = getPrevAstarNodeDir(x, y, z);

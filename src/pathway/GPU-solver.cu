@@ -103,6 +103,16 @@ int GPUPathwaySolver::gpuKnows(int x, int y, int z) {
   res = resvec[0];
   return res;
 }
+bool GPUPathwaySolver::isEx(int x, int y, int z, frDirEnum dir) {
+  bool res = false;
+  device_vector<bool> resvec;
+  resvec.push_back(false);
+  auto res_ptr = thrust::raw_pointer_cast(&resvec[0]);
+  test_isex<<<1, 1>>>(res_ptr, x, y, z, dir);
+  res = resvec[0];
+  return res;
+}
+
 bool GPUPathwaySolver::testhasEdge(int x, int y, int z, frDirEnum dir) {
   bool res = false;
   device_vector<bool> resvec;

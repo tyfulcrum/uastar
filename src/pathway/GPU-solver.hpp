@@ -42,6 +42,7 @@ public:
     bool solve();
     int gpuKnows(int x, int y, int z);
     bool testhasEdge(int x, int y, int z, frDirEnum dir);
+    bool isEx(int x, int y, int z, frDirEnum dir);
     frDirEnum testDir(int x, int y, int z);
     void getSolution(float *optimal, vector<int> *pathList);
 
