@@ -5,11 +5,14 @@
 #include <thrust/device_vector.h>
 #include <vector>
 #include <frCoreLangTypes.h>
+#include <dr/FlexMazeTypes.h>
 
 using std::vector;
 using thrust::device_vector;
 using bovec = vector<bool>;
+using ivec = vector<int>;
 using namespace coret;
+using fr::FlexMazeIdx;
 
 const int OPEN_LIST_SIZE = 10000000;
 const int NODE_LIST_SIZE = 150000000;
@@ -31,6 +34,10 @@ struct RoutingData {
   device_vector<bool> prevDirs;
   device_vector<bool> guides;
   device_vector<bool> zDirs;
+  device_vector<int> xCoords;
+  device_vector<int> yCoords;
+  device_vector<int> zCoords;
+  device_vector<int> zHeights;
 };
 class GPUPathwaySolver {
 public:
@@ -38,8 +45,11 @@ public:
     ~GPUPathwaySolver();
     void initialize(const vector<unsigned long long> &bits, 
         const bovec &prevDirs, const bovec &srcs, 
-        const bovec &guides, const bovec &zDirs, int x, int y, int z);
+        const bovec &guides, const bovec &zDirs, 
+        const ivec &xCoords, const ivec &yCoords, const ivec &zCoords,
+        const ivec &zHeights, int x, int y, int z);
     bool solve();
+    int test_estcost(FlexMazeIdx src, FlexMazeIdx dst1, FlexMazeIdx dst2, frDirEnum dir);
     int gpuKnows(int x, int y, int z);
     bool testhasEdge(int x, int y, int z, frDirEnum dir);
     bool isEx(int x, int y, int z, frDirEnum dir);

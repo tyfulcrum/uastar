@@ -132,9 +132,28 @@ frDirEnum GPUPathwaySolver::testDir(int x, int y, int z) {
   res = resvec[0];
   return res;
 }
+int GPUPathwaySolver::test_estcost(FlexMazeIdx src, FlexMazeIdx dst1, FlexMazeIdx dst2, frDirEnum dir) {
+    device_vector<int> resvec;
+    device_vector<FlexMazeIdx> d_idx;
+    d_idx.push_back(src);
+    d_idx.push_back(dst1);
+    d_idx.push_back(dst2);
+    resvec.push_back(0);
+    auto res_ptr = raw_pointer_cast(&resvec[0]);
+    auto src_ptr = raw_pointer_cast(&d_idx[0]);
+    auto dst1_ptr = src_ptr + 1;
+    auto dst2_ptr = src_ptr + 2;
+    dtest_estcost<<<1, 1>>>(res_ptr, src_ptr, dst1_ptr, dst2_ptr, dir);
+    auto res = resvec[0];
+    return res;
+}
+
 void GPUPathwaySolver::initialize(const vector<unsigned long long> &bits, 
     const bovec &prevDirs, const bovec &srcs, 
-        const bovec &guides, const bovec &zDirs, int x, int y, int z)
+        const bovec &guides, const bovec &zDirs, 
+        const ivec &xCoords, const ivec &yCoords, const ivec &zCoords,
+        const ivec &zHeights, 
+        int x, int y, int z)
 {
     cudaDeviceSynchronize();
     cudaDeviceReset();
@@ -146,6 +165,10 @@ void GPUPathwaySolver::initialize(const vector<unsigned long long> &bits,
     rd.srcs = srcs;
     rd.guides = guides;
     rd.zDirs = zDirs;
+    rd.xCoords = xCoords;
+    rd.yCoords = yCoords;
+    rd.zCoords = zCoords;
+    rd.zHeights= zHeights;
 
 
     auto bits_ptr = thrust::raw_pointer_cast(&rd.bits[0]);
@@ -153,7 +176,12 @@ void GPUPathwaySolver::initialize(const vector<unsigned long long> &bits,
     auto srcs_ptr = thrust::raw_pointer_cast(&rd.srcs[0]);
     auto guides_ptr = raw_pointer_cast(&rd.guides[0]);
     auto zdirs_ptr = thrust::raw_pointer_cast(&rd.zDirs[0]);
-    initializeDevicePointers(bits_ptr, prevDirs_ptr, srcs_ptr, guides_ptr, zdirs_ptr, x, y, z);
+    auto xCoords_ptr = thrust::raw_pointer_cast(&rd.xCoords[0]);
+    auto yCoords_ptr = thrust::raw_pointer_cast(&rd.yCoords[0]);
+    auto zCoords_ptr = thrust::raw_pointer_cast(&rd.zCoords[0]);
+    auto zHeights_ptr = thrust::raw_pointer_cast(&rd.zHeights[0]);
+    initializeDevicePointers(bits_ptr, prevDirs_ptr, srcs_ptr, guides_ptr, zdirs_ptr,
+        xCoords_ptr, yCoords_ptr, zCoords_ptr, zHeights_ptr, x, y, z);
 
     /*
     initializeCUDAConstantMemory(

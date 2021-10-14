@@ -5,11 +5,17 @@
 #include <cuda_runtime.h>
 #include <cuda_profiler_api.h>
 
+#include <cstring>
 #include <moderngpu.cuh>
 
 #include "utils.hpp"
 #include <frCoreLangTypes.h>
+#include <dr/FlexMazeTypes.h>
+#include <db/infra/frPoint.h>
+#include <db/infra/frOrient.h>
 using namespace coret;
+using frPoint = fr::frPoint;
+using FlexMazeIdx = fr::FlexMazeIdx;
 
 // Suppose we only use x dimension
 #define THREAD_ID (threadIdx.x)
@@ -94,6 +100,27 @@ __device__ bool *d_prevDirs;
 __device__ bool *d_srcs;
 __device__ bool *d_guides;
 __device__ bool *d_zDirs;
+__device__ int *xCoords;
+__device__ int *yCoords;
+__device__ int *zCoords;
+__device__ int *zHeights;
+
+__constant__ int DRIter;
+__constant__ int ripupMode;
+
+__constant__ frUInt4 ggDRCCost;
+
+/* Layer info */
+__device__ frPrefRoutingDirEnum *pref_dirs;
+__device__ int *pitch;
+__constant__ int top_layer_num;
+
+/* Tech info */
+__device__ int ****via2ViaForbiddenOverlapLen;
+__device__ int ****via2ViaForbiddenLen;
+__constant__ int via2ViaForbiddenOverlapLen_size;
+__constant__ int via2ViaForbiddenLen_size;
+
 
 inline __device__ int xyzToID(const int x, const int y, const int z)
 {
@@ -278,6 +305,16 @@ inline __device__ frDirEnum getPrevAstarNodeDir(frMIdx x, frMIdx y, frMIdx z) {
 __global__ void hasEdge_test(bool *res, int x, int y, int z, frDirEnum dir) {
   *res = hasGuide(x, y, z, dir);
 }
+
+__device__ int cuStrcmp(const char *s1, const char *s2) {
+  while(*s1 && (*s1 == *s2))
+  {
+    s1++;
+    s2++;
+  }
+  return *(const unsigned char*)s1 - *(const unsigned char*)s2;
+}
+
 __device__ bool isExpandable(int x, int y, int z, frDirEnum gdir) {
   //bool enableOutput = true;
   bool enableOutput = false;
@@ -287,6 +324,13 @@ __device__ bool isExpandable(int x, int y, int z, frDirEnum gdir) {
   frMIdx gridZ = z;
   bool hg = hasEdge(gridX, gridY, gridZ, dir);
   printf("GPU hasEdge: %d\n", hg);
+  char *s1 = "abcd";
+  char *s2 = "abc";
+  fr::FlexMazeIdx Idx(1, 2, 3);
+  Idx.set(2, 3, 1);
+  fr::frOrient(fr::frOrientEnum::frcMXR90);
+  fr::frPoint frpoint;
+  printf("GPU FlexMazeIdx: (%d, %d, %d)\n", Idx.x(), Idx.y(), Idx.z());
   /*
   if (enableOutput) {
     if (!hasEdge(gridX, gridY, gridZ, dir)) {
@@ -308,6 +352,141 @@ __device__ bool isExpandable(int x, int y, int z, frDirEnum gdir) {
   }
 }
 
+inline __device__ void getNextGrid(frMIdx &gridX, frMIdx &gridY, frMIdx &gridZ, const frDirEnum dir) {
+  switch(dir) {
+    case frDirEnum::E:
+      ++gridX;
+      break;
+    case frDirEnum::S:
+      --gridY;
+      break;
+    case frDirEnum::W:
+      --gridX;
+      break;
+    case frDirEnum::N:
+      ++gridY;
+      break;
+    case frDirEnum::U:
+      ++gridZ;
+      break;
+    case frDirEnum::D:
+      --gridZ;
+      break;
+    default:
+      ;
+  }
+  return;
+}
+
+inline __device__ int cuMax(int x, int y) {
+  int result = x > y ? x : y;
+  return result;
+}
+inline __device__ frPoint& getPoint(frPoint &in, frMIdx x, frMIdx y) {
+  in.set(xCoords[x], yCoords[y]);
+  return in;
+}
+
+inline __device__ frCoord getZHeight(frMIdx in) {
+  return zHeights[in];
+}
+inline __device__ int getTableEntryIdx(bool in1, bool in2, bool in3) {
+  int retIdx = 0;
+  if (in1) {
+    retIdx += 1;
+  }
+  retIdx <<= 1;
+  if (in2) {
+    retIdx += 1;
+  }
+  retIdx <<= 1;
+  if (in3) {
+    retIdx += 1;
+  }
+  return retIdx;
+}
+
+inline __device__ bool isIncluded(const int **intervals, int len) {
+  bool included = false;
+  auto interval = *intervals;
+  if (interval != nullptr) {
+      if (interval[0] <= len && interval[1] >= len) {
+        included = true;
+    }
+  }
+  return included;
+}
+
+// forbidden length table related 
+inline __device__ bool isVia2ViaForbiddenLen(int tableLayerIdx, bool isPrevDown, bool isCurrDown, bool isCurrDirX, frCoord len, bool isOverlap = false) {
+  int tableEntryIdx = getTableEntryIdx(!isPrevDown, !isCurrDown, !isCurrDirX);
+  if (isOverlap) {
+    return isIncluded(via2ViaForbiddenOverlapLen[tableLayerIdx][tableEntryIdx], len);
+  } else {
+    return isIncluded(via2ViaForbiddenLen[tableLayerIdx][tableEntryIdx], len);
+  }
+}
+
+__device__ frCost getEstCost(const FlexMazeIdx &src, const FlexMazeIdx &dstMazeIdx1,
+                                const FlexMazeIdx &dstMazeIdx2, const frDirEnum &dir) {
+  // bend cost
+  int bendCnt = 0;
+  int forbiddenPenalty = 0;
+  frPoint srcPoint, dstPoint1, dstPoint2;
+  getPoint(srcPoint, src.x(), src.y());
+  getPoint(dstPoint1, dstMazeIdx1.x(), dstMazeIdx1.y());
+  getPoint(dstPoint2, dstMazeIdx2.x(), dstMazeIdx2.y());
+  frCoord minCostX = cuMax(cuMax(dstPoint1.x() - srcPoint.x(), srcPoint.x() - dstPoint2.x()), 0) * 1;
+  frCoord minCostY = cuMax(cuMax(dstPoint1.y() - srcPoint.y(), srcPoint.y() - dstPoint2.y()), 0) * 1;
+  frCoord minCostZ = cuMax(cuMax(getZHeight(dstMazeIdx1.z()) - getZHeight(src.z()), 
+                       getZHeight(src.z()) - getZHeight(dstMazeIdx2.z())), 0) * 1;
+
+
+  bendCnt += (minCostX && dir != frDirEnum::UNKNOWN && dir != frDirEnum::E && dir != frDirEnum::W) ? 1 : 0;
+  bendCnt += (minCostY && dir != frDirEnum::UNKNOWN && dir != frDirEnum::S && dir != frDirEnum::N) ? 1 : 0;
+  bendCnt += (minCostZ && dir != frDirEnum::UNKNOWN && dir != frDirEnum::U && dir != frDirEnum::D) ? 1 : 0;
+
+  int gridX = src.x();
+  int gridY = src.y();
+  int gridZ = src.z();
+  getNextGrid(gridX, gridY, gridZ, dir);
+  frPoint nextPoint;
+  getPoint(nextPoint, gridX, gridY);
+/*
+  // avoid propagating to location that will cause fobidden via spacing to boundary pin
+  if (DBPROCESSNODE == "GF14_13M_3Mx_2Cx_4Kx_2Hx_2Gx_LB") {
+    if (DRIter >= 30 && ripupMode == 0) {
+      if (dstMazeIdx1 == dstMazeIdx2 && gridZ == dstMazeIdx1.z()) {
+        auto layerNum = (gridZ + 1) * 2;
+        bool isH = (pref_dirs[layerNum] == frPrefRoutingDirEnum::frcHorzPrefRoutingDir);
+        if (isH) {
+          auto gap = abs(nextPoint.y() - dstPoint1.y());
+          if (gap &&
+              (isVia2ViaForbiddenLen(gridZ, false, false, false, gap, false) || layerNum - 2 < BOTTOM_ROUTING_LAYER) &&
+              (isVia2ViaForbiddenLen(gridZ, true, true, false, gap, false) || layerNum + 2 > top_layer_num)) {
+            forbiddenPenalty = pitch[layerNum] * ggDRCCost * 20;
+          }
+        } else {
+          auto gap = abs(nextPoint.x() - dstPoint1.x());
+          if (gap &&
+              (getDesign()->getTech()->isVia2ViaForbiddenLen(gridZ, false, false, true, gap, false) || layerNum - 2 < BOTTOM_ROUTING_LAYER) &&
+              (getDesign()->getTech()->isVia2ViaForbiddenLen(gridZ, true, true, true, gap, false) || layerNum + 2 > getDesign()->getTech()->getTopLayerNum())) {
+            forbiddenPenalty = pitch[layerNum] * ggDRCCost * 20;
+          }
+        }
+      }
+    }
+  }
+*/
+
+  return (minCostX + minCostY + minCostZ + bendCnt + forbiddenPenalty);
+}
+
+__global__ void dtest_estcost(int *res, FlexMazeIdx *src, 
+    FlexMazeIdx *dstMazeIdx1, FlexMazeIdx *dstMazeIdx2, frDirEnum dir) {
+  *res = getEstCost(*src, *dstMazeIdx1, *dstMazeIdx2, dir);
+}
+
 __global__ void test_isex(bool *res, int x, int y, int z, frDirEnum dir) {
   *res = isExpandable(x, y, z, dir);
 }
@@ -323,7 +502,7 @@ __global__ void read_bool_vec(int *res, int x, int y, int z) {
 
 inline cudaError_t initializeDevicePointers(
     unsigned long long *bits, bool *prevDirs, bool *srcs, bool *guides, bool *zDirs, 
-    int height, int width, int z
+    int *d_xCoords, int *d_yCoords, int *d_zCoords, int *d_zHeights, int height, int width, int z
 )
 {
     cudaError_t ret = cudaSuccess;
@@ -332,6 +511,10 @@ inline cudaError_t initializeDevicePointers(
     ret = cudaMemcpyToSymbol(d_srcs, &srcs, sizeof(bool*));
     ret = cudaMemcpyToSymbol(d_guides, &guides, sizeof(bool*));
     ret = cudaMemcpyToSymbol(d_zDirs, &zDirs, sizeof(bool*));
+    ret = cudaMemcpyToSymbol(xCoords, &d_xCoords, sizeof(int*));
+    ret = cudaMemcpyToSymbol(yCoords, &d_yCoords, sizeof(int*));
+    ret = cudaMemcpyToSymbol(zCoords, &d_zCoords, sizeof(int*));
+    ret = cudaMemcpyToSymbol(zHeights, &d_zHeights, sizeof(int*));
     ret = cudaMemcpyToSymbol(d_height, &height, sizeof(int));
     ret = cudaMemcpyToSymbol(d_width, &width, sizeof(int));
     ret = cudaMemcpyToSymbol(d_layer, &z, sizeof(int));
