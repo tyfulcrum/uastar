@@ -13,6 +13,7 @@ using bovec = vector<bool>;
 using ivec = vector<int>;
 using namespace coret;
 using fr::FlexMazeIdx;
+using coret::cuWavefrontGrid;
 
 const int OPEN_LIST_SIZE = 10000000;
 const int NODE_LIST_SIZE = 150000000;
@@ -38,6 +39,10 @@ struct RoutingData {
   device_vector<int> yCoords;
   device_vector<int> zCoords;
   device_vector<int> zHeights;
+  device_vector<frUInt4> path_widths;
+  device_vector<int> via2ViaForbOverlapLen;
+  device_vector<int> via2viaForbLen;
+  device_vector<int> viaForbiTurnLen;
 };
 class GPUPathwaySolver {
 public:
@@ -47,7 +52,12 @@ public:
         const bovec &prevDirs, const bovec &srcs, 
         const bovec &guides, const bovec &zDirs, 
         const ivec &xCoords, const ivec &yCoords, const ivec &zCoords,
-        const ivec &zHeights, int x, int y, int z);
+        const ivec &zHeights, const vector<frUInt4> &path_widths, 
+        frUInt4 ggDRCCost, frUInt4 ggMarkerCost,
+        const ivec &via2ViaForbOverlapLen, const ivec &via2viaForbLen, 
+        const ivec &viaForbiTurnLen, 
+        bool drWorker_ava, int drIter, int ripupMode, 
+        int p_viaFOLen_size, int p_viaFLen_size, int p_viaFTLen_size);
     bool solve();
     int test_estcost(FlexMazeIdx src, FlexMazeIdx dst1, FlexMazeIdx dst2, frDirEnum dir);
     int gpuKnows(int x, int y, int z);
@@ -55,6 +65,15 @@ public:
     bool isEx(int x, int y, int z, frDirEnum dir);
     frDirEnum testDir(int x, int y, int z);
     void getSolution(float *optimal, vector<int> *pathList);
+    cuWavefrontGrid test_expand(frDirEnum dir, cuWavefrontGrid &grid, 
+       const FlexMazeIdx &dstMazeIdx1, const FlexMazeIdx &dstMazeIdx2, 
+       const frPoint &centerPt);
+    frCost test_npCost(frDirEnum dir, cuWavefrontGrid &grid);
+    frCost test_npCost(frDirEnum dir, 
+        int xIn, int yIn, int zIn, frCoord layerPathAreaIn, 
+        frCoord vLengthXIn, frCoord vLengthYIn,
+        bool prevViaUpIn, frCoord tLengthIn,
+        frCoord distIn, frCost pathCostIn, frCost costIn, unsigned int backTraceBufferIn);
 
 private:
     bool isPrime(uint32_t number);

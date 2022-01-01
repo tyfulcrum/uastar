@@ -13,9 +13,11 @@
 #include <dr/FlexMazeTypes.h>
 #include <db/infra/frPoint.h>
 #include <db/infra/frOrient.h>
+#include <climits>
 using namespace coret;
 using frPoint = fr::frPoint;
 using FlexMazeIdx = fr::FlexMazeIdx;
+#define GRIDGRAPHDRCCOSTSIZE 8
 
 // Suppose we only use x dimension
 #define THREAD_ID (threadIdx.x)
@@ -105,21 +107,29 @@ __device__ int *yCoords;
 __device__ int *zCoords;
 __device__ int *zHeights;
 
+__constant__ bool drWorker;
 __constant__ int DRIter;
 __constant__ int ripupMode;
 
 __constant__ frUInt4 ggDRCCost;
+__constant__ frUInt4 ggMarkerCost;
 
 /* Layer info */
 __device__ frPrefRoutingDirEnum *pref_dirs;
 __device__ int *pitch;
+__device__ frUInt4 *path_width;
 __constant__ int top_layer_num;
 
 /* Tech info */
-__device__ int ****via2ViaForbiddenOverlapLen;
-__device__ int ****via2ViaForbiddenLen;
-__constant__ int via2ViaForbiddenOverlapLen_size;
-__constant__ int via2ViaForbiddenLen_size;
+__device__ int *via2ViaForbiddenOverlapLen;
+__device__ int *via2ViaForbiddenLen;
+__device__ int *viaForbiddenTurnLen;
+__constant__ int via_sizeX;
+/* size Y */
+__constant__ int viaFOLen_size;
+__constant__ int viaFLen_size;
+__constant__ int viaFTLen_size;
+
 
 
 inline __device__ int xyzToID(const int x, const int y, const int z)
@@ -390,6 +400,18 @@ inline __device__ frPoint& getPoint(frPoint &in, frMIdx x, frMIdx y) {
 inline __device__ frCoord getZHeight(frMIdx in) {
   return zHeights[in];
 }
+inline __device__ int getTableEntryIdx(bool in1, bool in2) {
+  int retIdx = 0;
+  if (in1) {
+    retIdx += 1;
+  }
+  retIdx <<= 1;
+  if (in2) {
+    retIdx += 1;
+  }
+  return retIdx;
+}
+
 inline __device__ int getTableEntryIdx(bool in1, bool in2, bool in3) {
   int retIdx = 0;
   if (in1) {
@@ -406,25 +428,33 @@ inline __device__ int getTableEntryIdx(bool in1, bool in2, bool in3) {
   return retIdx;
 }
 
-inline __device__ bool isIncluded(const int **intervals, int len) {
-  bool included = false;
-  auto interval = *intervals;
-  if (interval != nullptr) {
-      if (interval[0] <= len && interval[1] >= len) {
-        included = true;
+inline __device__ bool isIncluded(const int *intervals, int len) {
+  if (intervals != nullptr) {
+    auto first = intervals[0];
+    auto second = intervals[1];
+    if (first <= len && second >= len) {
+      printf("isIncluded OK!\n");
+      return true;
     }
   }
-  return included;
+  return false;
 }
 
 // forbidden length table related 
 inline __device__ bool isVia2ViaForbiddenLen(int tableLayerIdx, bool isPrevDown, bool isCurrDown, bool isCurrDirX, frCoord len, bool isOverlap = false) {
   int tableEntryIdx = getTableEntryIdx(!isPrevDown, !isCurrDown, !isCurrDirX);
   if (isOverlap) {
-    return isIncluded(via2ViaForbiddenOverlapLen[tableLayerIdx][tableEntryIdx], len);
+    return isIncluded(via2ViaForbiddenOverlapLen + (tableLayerIdx * viaFOLen_size * 2 + tableEntryIdx * 2), len);
   } else {
-    return isIncluded(via2ViaForbiddenLen[tableLayerIdx][tableEntryIdx], len);
+    return isIncluded(via2ViaForbiddenLen + (tableLayerIdx * viaFLen_size * 2 + tableEntryIdx * 2), len);
   }
+}
+
+__device__ bool isViaForbiddenTurnLen(int tableLayerIdx, bool isDown, bool isCurrDirX, frCoord len) {
+  int tableEntryIdx = getTableEntryIdx(!isDown, !isCurrDirX);
+  // printf("viaFTL!\n");
+  // printf("viaFTLen_size: %d\n", viaFLen_size);
+  return isIncluded(viaForbiddenTurnLen /*+ (tableLayerIdx * 4 * 2 + tableEntryIdx * 2)*/, len);
 }
 
 __device__ frCost getEstCost(const FlexMazeIdx &src, const FlexMazeIdx &dstMazeIdx1,
@@ -481,6 +511,459 @@ __device__ frCost getEstCost(const FlexMazeIdx &src, const FlexMazeIdx &dstMazeI
 
   return (minCostX + minCostY + minCostZ + bendCnt + forbiddenPenalty);
 }
+inline __device__ bool hasGridCostE(frMIdx x, frMIdx y, frMIdx z) {
+  return getBit(getIdx(x, y, z), 12);
+}
+    // unsafe access, no check
+inline __device__ bool hasGridCostN(frMIdx x, frMIdx y, frMIdx z) {
+  return getBit(getIdx(x, y, z), 13);
+}
+    // unsafe access, no check
+inline __device__ bool hasGridCostU(frMIdx x, frMIdx y, frMIdx z) {
+  return getBit(getIdx(x, y, z), 14);
+}
+
+inline __device__ bool hasGridCost(frMIdx x, frMIdx y, frMIdx z, frDirEnum dir) {
+  bool sol = false;
+  correct(x, y, z, dir);
+  switch(dir) {
+    case frDirEnum::E: 
+      sol = hasGridCostE(x, y, z);
+      break;
+    case frDirEnum::N:
+      sol = hasGridCostN(x, y, z);
+      break;
+    default: 
+      sol = hasGridCostU(x, y, z);
+  }
+  return sol;
+}
+inline __device__ frUInt4 getBits(frMIdx idx, frMIdx pos, frUInt4 length) {
+  auto tmp = d_bits[idx] & (((1ull << length) - 1) << pos); // mask
+  return tmp >> pos;
+}
+
+__device__ void correctU(frMIdx &x, frMIdx &y, frMIdx &z, frDirEnum &dir) {
+  switch (dir) {
+    case frDirEnum::D:
+      z--;
+      dir = frDirEnum::U;
+      break;
+    default:
+      ;
+  }
+  return;
+}
+
+__device__ bool hasDRCCost(frMIdx x, frMIdx y, frMIdx z, frDirEnum dir) {
+  frUInt4 sol = 0;
+  if (dir != frDirEnum::D && dir != frDirEnum::U) {
+    reverse(x, y, z, dir);
+    auto idx = getIdx(x, y, z);
+    sol = (getBits(idx, 16, GRIDGRAPHDRCCOSTSIZE));
+  } else {
+    correctU(x, y, z, dir);
+    auto idx = getIdx(x, y, z);
+    sol = (getBits(idx, 24, GRIDGRAPHDRCCOSTSIZE));
+  }
+  return (sol);
+}
+
+__device__ bool hasMarkerCost(frMIdx x, frMIdx y, frMIdx z, frDirEnum dir) {
+  frUInt4 sol = 0;
+  // old
+  if (dir != frDirEnum::D && dir != frDirEnum::U) {
+    reverse(x, y, z, dir);
+    auto idx = getIdx(x, y, z);
+    sol += (getBits(idx, 32, GRIDGRAPHDRCCOSTSIZE));
+  } else {
+    correctU(x, y, z, dir);
+    auto idx = getIdx(x, y, z);
+    sol += (getBits(idx, 40, GRIDGRAPHDRCCOSTSIZE));
+  }
+  return (sol);
+}
+
+__device__ bool isOverrideShapeCost(frMIdx x, frMIdx y, frMIdx z, frDirEnum dir) {
+  if (dir != frDirEnum::D && dir != frDirEnum::U) {
+    return false;
+  } else {
+    correctU(x, y, z, dir);
+    auto idx = getIdx(x, y, z);
+    return getBit(idx, 11);
+  }
+}
+
+__device__ bool hasShapeCost(frMIdx x, frMIdx y, frMIdx z, frDirEnum dir) {
+  frUInt4 sol = 0;
+  if (dir != frDirEnum::D && dir != frDirEnum::U) {
+    reverse(x, y, z, dir);
+    auto idx = getIdx(x, y, z);
+    sol = (getBits(idx, 56, GRIDGRAPHDRCCOSTSIZE));
+  } else {
+    correctU(x, y, z, dir);
+    auto idx = getIdx(x, y, z);
+    sol = isOverrideShapeCost(x, y, z, dir) ? 0 : (getBits(idx, 48, GRIDGRAPHDRCCOSTSIZE));
+  }
+  return (sol);
+}
+__device__ bool isBlocked(frMIdx x, frMIdx y, frMIdx z, frDirEnum dir) {
+  correct(x, y, z, dir);
+  if (isValid(x, y, z)) {
+    auto idx = getIdx(x, y, z);
+    switch (dir) {
+      case frDirEnum::E:
+        return getBit(idx, 3);
+      case frDirEnum::N:
+        return getBit(idx, 4);
+      case frDirEnum::U:
+        return getBit(idx, 5);
+      default:
+        return false;
+    }
+  } else {
+    return false;
+  }
+}
+
+__device__ frCoord getEdgeLength(frMIdx x, frMIdx y, frMIdx z, frDirEnum dir) {
+  frCoord sol = 0;
+  correct(x, y, z, dir);
+  //if (isValid(x, y, z, dir)) {
+  switch (dir) {
+    case frDirEnum::E:
+      sol = xCoords[x+1] - xCoords[x];
+      break;
+    case frDirEnum::N:
+      sol = yCoords[y+1] - yCoords[y];
+      break;
+    case frDirEnum::U:
+      sol = zHeights[z+1] - zHeights[z];
+      break;
+    default:
+      ;
+  }
+  //}
+  return sol;
+}
+
+inline __device__    frLayerNum getLayerNum(frMIdx z) {
+  return zCoords[z];
+}
+
+__device__ void getPrevGrid(frMIdx &gridX, frMIdx &gridY, frMIdx &gridZ, const frDirEnum dir) {
+  switch(dir) {
+    case frDirEnum::E:
+      --gridX;
+      break;
+    case frDirEnum::S:
+      ++gridY;
+      break;
+    case frDirEnum::W:
+      ++gridX;
+      break;
+    case frDirEnum::N:
+      --gridY;
+      break;
+    case frDirEnum::U:
+      --gridZ;
+      break;
+    case frDirEnum::D:
+      ++gridZ;
+      break;
+    default:
+      ;
+  }
+  return;
+}
+
+__device__ frCost getNextPathCost(const cuWavefrontGrid &currGrid, const frDirEnum &dir) {
+  // bool enableOutput = true;
+  bool enableOutput = false;
+  frMIdx gridX = currGrid.x();
+  frMIdx gridY = currGrid.y();
+  frMIdx gridZ = currGrid.z();
+  // printf("GPU processing (%d, %d, %d)\n", gridX, gridY, gridZ);
+  frCost nextPathCost = currGrid.getPathCost();
+  // bending cost
+  auto currDir = currGrid.getLastDir();
+  auto lNum = getLayerNum(currGrid.z());
+  auto pathWidth = path_width[lNum];
+
+  if (currDir != dir && currDir != frDirEnum::UNKNOWN) {
+    // original
+    ++nextPathCost;
+  }
+  auto oldcost = nextPathCost;
+
+  // via2viaForbiddenLen enablement
+  if (dir == frDirEnum::U || dir == frDirEnum::D) {
+    frCoord currVLengthX = 0;
+    frCoord currVLengthY = 0;
+    currGrid.getVLength(currVLengthX, currVLengthY);
+    bool isCurrViaUp = (dir == frDirEnum::U);
+    bool isForbiddenVia2Via = false;
+    // check only y
+    if (currVLengthX == 0 && currVLengthY > 0 && isVia2ViaForbiddenLen(gridZ, !(currGrid.isPrevViaUp()), !isCurrViaUp, false, currVLengthY, false)) {
+      isForbiddenVia2Via = true;
+      // check only x
+    } else if (currVLengthX > 0 && currVLengthY == 0 && isVia2ViaForbiddenLen(gridZ, !(currGrid.isPrevViaUp()), !isCurrViaUp, true, currVLengthX, false)) {
+      isForbiddenVia2Via = true;
+      // check both x and y
+    } else if (currVLengthX > 0 && currVLengthY > 0 && 
+        (isVia2ViaForbiddenLen(gridZ, !(currGrid.isPrevViaUp()), !isCurrViaUp, false, currVLengthY) &&
+         isVia2ViaForbiddenLen(gridZ, !(currGrid.isPrevViaUp()), !isCurrViaUp, true, currVLengthX))) {
+      isForbiddenVia2Via = true;
+    }
+
+    if (isForbiddenVia2Via) {
+      if (drWorker && DRIter >= 3) {
+        nextPathCost += ggMarkerCost * getEdgeLength(gridX, gridY, gridZ, dir);
+      } else {
+        nextPathCost += ggDRCCost * getEdgeLength(gridX, gridY, gridZ, dir);
+      }
+    }
+  }
+  // printf("GPU ok with (%d, %d, %d)\n", gridX, gridY, gridZ);
+
+  // via2turn forbidden len enablement
+  frCoord tLength    = INT_MAX;
+  frCoord tLengthDummy = 0;
+  bool    isTLengthViaUp = false;
+  bool    isForbiddenTLen = false;
+  if (currDir != frDirEnum::UNKNOWN && currDir != dir) {
+    // next dir is a via
+    if (dir == frDirEnum::U || dir == frDirEnum::D) {
+      isTLengthViaUp = (dir == frDirEnum::U);
+      // if there was a turn before
+      if (tLength != INT_MAX) {
+        if (currDir == frDirEnum::W || currDir == frDirEnum::E) {
+          tLength = currGrid.getTLength();
+          if (isViaForbiddenTurnLen(gridZ, !isTLengthViaUp, true, tLength)) {
+            isForbiddenTLen = true;
+          }
+        } else if (currDir == frDirEnum::S || currDir == frDirEnum::N) {
+          tLength = currGrid.getTLength();
+          if (isViaForbiddenTurnLen(gridZ, !isTLengthViaUp, false, tLength)) {
+            isForbiddenTLen = true;
+          }
+        }
+      }
+      // curr is a planar turn
+    } else {
+      isTLengthViaUp = currGrid.isPrevViaUp();
+      if (currDir == frDirEnum::W || currDir == frDirEnum::E) {
+      // printf("(%d, %d, %d) Ping!\n", gridX, gridY, gridZ);
+        currGrid.getVLength(tLength, tLengthDummy);
+        /*
+        auto vvv = isViaForbiddenTurnLen(gridZ, !isTLengthViaUp, true, tLength);
+        printf("GPU isViaForbiddenTurnLen: %d\n", vvv);
+        */
+        if (isViaForbiddenTurnLen(gridZ, !isTLengthViaUp, true, tLength)) {
+          isForbiddenTLen = true;
+        }
+      } else if (currDir == frDirEnum::S || currDir == frDirEnum::N) {
+        currGrid.getVLength(tLengthDummy, tLength);
+      // printf("(%d, %d, %d) Pong!\n", gridX, gridY, gridZ);
+        /*
+          auto vvv = isViaForbiddenTurnLen(gridZ, !isTLengthViaUp, false, tLength);
+          printf("GPU isViaForbiddenTurnLen: %d\n", vvv);
+          */
+        if (isViaForbiddenTurnLen(gridZ, !isTLengthViaUp, false, tLength)) {
+          isForbiddenTLen = true;
+        }
+      }
+    }
+    if (isForbiddenTLen) {
+      if (drWorker && DRIter >= 3) {
+        nextPathCost += ggDRCCost * getEdgeLength(gridX, gridY, gridZ, dir);
+      } else {
+        nextPathCost += ggMarkerCost * getEdgeLength(gridX, gridY, gridZ, dir);
+      }
+    }
+  }
+
+  bool gridCost   = hasGridCost(gridX, gridY, gridZ, dir);
+  bool drcCost    = hasDRCCost(gridX, gridY, gridZ, dir);
+  bool markerCost = hasMarkerCost(gridX, gridY, gridZ, dir);
+  bool shapeCost  = hasShapeCost(gridX, gridY, gridZ, dir);
+  bool blockCost  = isBlocked(gridX, gridY, gridZ, dir);
+  bool guideCost  = hasGuide(gridX, gridY, gridZ, dir);
+
+  const frUInt4 GRIDCOST        = 2;
+  const frUInt4 SHAPECOST       = 8;
+  const frUInt4 BLOCKCOST       = 32;
+  const frUInt4 GUIDECOST       = 1; // disabled change getNextPathCost to enable
+  // temporarily disable guideCost
+
+  auto gridCostv = gridCost    ? GRIDCOST         * getEdgeLength(gridX, gridY, gridZ, dir) : 0;
+  auto drcCostv = drcCost     ? ggDRCCost        * getEdgeLength(gridX, gridY, gridZ, dir) : 0;
+  auto markerCostv = markerCost  ? ggMarkerCost     * getEdgeLength(gridX, gridY, gridZ, dir) : 0;
+  auto shapeCostv = shapeCost   ? SHAPECOST        * getEdgeLength(gridX, gridY, gridZ, dir) : 0;
+  auto blockCostv = blockCost   ? BLOCKCOST        * pathWidth * 20                          : 0;
+  auto guideCostv =!guideCost ? GUIDECOST        * getEdgeLength(gridX, gridY, gridZ, dir) : 0;
+
+  nextPathCost += getEdgeLength(gridX, gridY, gridZ, dir)
+    + (gridCost   ? GRIDCOST         * getEdgeLength(gridX, gridY, gridZ, dir) : 0)
+    + (drcCost    ? ggDRCCost        * getEdgeLength(gridX, gridY, gridZ, dir) : 0)
+    + (markerCost ? ggMarkerCost     * getEdgeLength(gridX, gridY, gridZ, dir) : 0)
+    + (shapeCost  ? SHAPECOST        * getEdgeLength(gridX, gridY, gridZ, dir) : 0)
+    + (blockCost  ? BLOCKCOST        * pathWidth * 20                          : 0)
+    + (!guideCost ? GUIDECOST        * getEdgeLength(gridX, gridY, gridZ, dir) : 0);
+  /*
+  if (enableOutput) {
+    cout <<"edge grid/shape/drc/marker/blk/length = " 
+      <<hasGridCost(gridX, gridY, gridZ, dir)   <<"/"
+      <<hasShapeCost(gridX, gridY, gridZ, dir)  <<"/"
+      <<hasDRCCost(gridX, gridY, gridZ, dir)    <<"/"
+      <<hasMarkerCost(gridX, gridY, gridZ, dir) <<"/"
+      <<isBlocked(gridX, gridY, gridZ, dir) <<"/"
+      <<getEdgeLength(gridX, gridY, gridZ, dir) <<endl;
+  }
+  */
+  // printf("GPU Costs %u: old cost: %u\n", nextPathCost, oldcost);
+  return nextPathCost;
+
+}
+
+__device__ FlexMazeIdx getTailIdx(const FlexMazeIdx &currIdx, const cuWavefrontGrid &currGrid) {
+  constexpr auto WAVEFRONTBUFFERSIZE = 2;
+  constexpr auto DIRBITSIZE = 3;
+  int gridX = currIdx.x();
+  int gridY = currIdx.y();
+  int gridZ = currIdx.z();
+  auto backTraceBuffer = currGrid.getBackTraceBuffer();
+  for (int i = 0; i < WAVEFRONTBUFFERSIZE; ++i) {
+    int currDirVal = backTraceBuffer - ((backTraceBuffer >> DIRBITSIZE) << DIRBITSIZE);
+    frDirEnum currDir = static_cast<frDirEnum>(currDirVal);
+    backTraceBuffer >>= DIRBITSIZE;
+    getPrevGrid(gridX, gridY, gridZ, currDir);
+  }
+  return FlexMazeIdx(gridX, gridY, gridZ);
+}
+
+__device__ cuWavefrontGrid expand(cuWavefrontGrid &dest,  cuWavefrontGrid &currGrid, const frDirEnum &dir, 
+                                      const FlexMazeIdx &dstMazeIdx1, const FlexMazeIdx &dstMazeIdx2,
+                                      const frPoint &centerPt) {
+  bool enableOutput = false;
+  //bool enableOutput = true;
+  frCost nextEstCost, nextPathCost;
+  int gridX = currGrid.x();
+  int gridY = currGrid.y();
+  int gridZ = currGrid.z();
+
+  getNextGrid(gridX, gridY, gridZ, dir);
+  
+  FlexMazeIdx nextIdx(gridX, gridY, gridZ);
+  // get cost
+  nextEstCost = getEstCost(nextIdx, dstMazeIdx1, dstMazeIdx2, dir);
+  nextPathCost = getNextPathCost(currGrid, dir);  
+  if (enableOutput) {
+    std::cout << "  expanding from (" << currGrid.x() << ", " << currGrid.y() << ", " << currGrid.z() 
+              << ") [pathCost / totalCost = " << currGrid.getPathCost() << " / " << currGrid.getCost() << "] to "
+              << "(" << gridX << ", " << gridY << ", " << gridZ << ") [pathCost / totalCost = " 
+              << nextPathCost << " / " << nextPathCost + nextEstCost << "]\n";
+  }
+  auto lNum = getLayerNum(currGrid.z());
+  auto pathWidth = path_width[lNum];
+  frPoint currPt;
+  getPoint(currPt, gridX, gridY);
+  frCoord currDist = abs(currPt.x() - centerPt.x()) + abs(currPt.y() - centerPt.y());
+
+  // vlength calculation
+  frCoord currVLengthX = 0;
+  frCoord currVLengthY = 0;
+  currGrid.getVLength(currVLengthX, currVLengthY);
+  auto nextVLengthX = currVLengthX;
+  auto nextVLengthY = currVLengthY;
+  bool nextIsPrevViaUp = currGrid.isPrevViaUp();
+  if (dir == frDirEnum::U || dir == frDirEnum::D) {
+    nextVLengthX = 0;
+    nextVLengthY = 0;
+    nextIsPrevViaUp = (dir == frDirEnum::D); // up via if current path goes down
+  } else {
+    if (currVLengthX != std::numeric_limits<frCoord>::max() &&
+        currVLengthY != std::numeric_limits<frCoord>::max()) {
+      if (dir == frDirEnum::W || dir == frDirEnum::E) {
+        nextVLengthX += getEdgeLength(currGrid.x(), currGrid.y(), currGrid.z(), dir);
+      } else { 
+        nextVLengthY += getEdgeLength(currGrid.x(), currGrid.y(), currGrid.z(), dir);
+      }
+    }
+  }
+  
+  // tlength calculation
+  auto currTLength = currGrid.getTLength();
+  auto nextTLength = currTLength;
+  // if there was a turn, then add tlength
+  if (currTLength != std::numeric_limits<frCoord>::max()) {
+    nextTLength += getEdgeLength(currGrid.x(), currGrid.y(), currGrid.z(), dir);
+  }
+  // if current is a turn, then reset tlength
+  if (currGrid.getLastDir() != frDirEnum::UNKNOWN && currGrid.getLastDir() != dir) {
+    nextTLength = getEdgeLength(currGrid.x(), currGrid.y(), currGrid.z(), dir);
+  }
+  // if current is a via, then reset tlength
+  if (dir == frDirEnum::U || dir == frDirEnum::D) {
+    nextTLength = std::numeric_limits<frCoord>::max();
+  }
+
+  cuWavefrontGrid nextWavefrontGrid(gridX, gridY, gridZ, 
+                                      currGrid.getLayerPathArea() + getEdgeLength(currGrid.x(), currGrid.y(), currGrid.z(), dir) * pathWidth, 
+                                      nextVLengthX, nextVLengthY, nextIsPrevViaUp,
+                                      nextTLength,
+                                      currDist,
+                                      nextPathCost, nextPathCost + nextEstCost, currGrid.getBackTraceBuffer());
+  if (dir == frDirEnum::U || dir == frDirEnum::D) {
+    nextWavefrontGrid.resetLayerPathArea();
+    nextWavefrontGrid.resetLength();
+    if (dir == frDirEnum::U) {
+      nextWavefrontGrid.setPrevViaUp(false);
+    } else {
+      nextWavefrontGrid.setPrevViaUp(true);
+    }
+    nextWavefrontGrid.addLayerPathArea((dir == frDirEnum::U) ? getHalfViaEncArea(currGrid.z(), false) : getHalfViaEncArea(gridZ, true));
+  }
+  // update wavefront buffer
+  auto tailDir = nextWavefrontGrid.shiftAddBuffer(dir);
+  // non-buffer enablement is faster for ripup all
+  // commit grid prev direction if needed
+  auto tailIdx = getTailIdx(nextIdx, nextWavefrontGrid);
+  if (tailDir != frDirEnum::UNKNOWN) {
+    if (getPrevAstarNodeDir(tailIdx.x(), tailIdx.y(), tailIdx.z()) == frDirEnum::UNKNOWN ||
+        getPrevAstarNodeDir(tailIdx.x(), tailIdx.y(), tailIdx.z()) == tailDir) {
+      setPrevAstarNodeDir(tailIdx.x(), tailIdx.y(), tailIdx.z(), tailDir);
+      // TODO: wavefront.push(nextWavefrontGrid);
+      if (enableOutput) {
+        std::cout << "    commit (" << tailIdx.x() << ", " << tailIdx.y() << ", " << tailIdx.z() << ") prev accessing dir = " << (int)tailDir << "\n";
+      }
+    }
+  } else {  
+    // TODO:  add to wavefront
+    // wavefront.push(nextWavefrontGrid);
+  }
+
+  return nextWavefrontGrid;
+}
+
+
+__global__ void test_getNCost_obj(frCost *res, frDirEnum dir, 
+    cuWavefrontGrid grid) {
+  *res = getNextPathCost(grid, dir);
+}
+
+__global__ void test_getNCost(frCost *res, frDirEnum dir, 
+int xIn, int yIn, int zIn, frCoord layerPathAreaIn, 
+          frCoord vLengthXIn, frCoord vLengthYIn,
+          bool prevViaUpIn, frCoord tLengthIn,
+          frCoord distIn, frCost pathCostIn, frCost costIn, 
+          unsigned int backTraceBufferIn
+    ) {
+  cuWavefrontGrid grid(xIn, yIn, zIn, layerPathAreaIn, vLengthXIn, vLengthYIn, 
+      prevViaUpIn, tLengthIn, distIn, pathCostIn, costIn, backTraceBufferIn);
+  *res = getNextPathCost(grid, dir);
+}
+
 
 __global__ void dtest_estcost(int *res, FlexMazeIdx *src, 
     FlexMazeIdx *dstMazeIdx1, FlexMazeIdx *dstMazeIdx2, frDirEnum dir) {
@@ -499,10 +982,18 @@ __global__ void read_bool_vec(int *res, int x, int y, int z) {
   // printf("\n GPU vec[%d] = %d\n", in, d_zDirs[in]);
   *res = getIdx(x, y, z);
 }
+__global__ void test_cuexpand(cuWavefrontGrid *res, cuWavefrontGrid *grid, frDirEnum dir, 
+    const FlexMazeIdx *dstMazeIdx1, const FlexMazeIdx *dstMazeIdx2, 
+    const frPoint *centerPt) {
+  *res = expand(*grid, dir, *dstMazeIdx1, *dstMazeIdx2, *centerPt);
+}
 
 inline cudaError_t initializeDevicePointers(
     unsigned long long *bits, bool *prevDirs, bool *srcs, bool *guides, bool *zDirs, 
-    int *d_xCoords, int *d_yCoords, int *d_zCoords, int *d_zHeights, int height, int width, int z
+    int *d_xCoords, int *d_yCoords, int *d_zCoords, int *d_zHeights, int height, 
+    int width, int z, frUInt4 *path_widths, int layer_num, frUInt4 p_ggDRCCost, 
+    frUInt4 p_ggMarkerCost, bool drWorker_ava, int p_DRIter, int p_ripupMode, 
+    int p_viaFOLen_size, int p_viaFLen_size, int p_viaFTLen_size
 )
 {
     cudaError_t ret = cudaSuccess;
@@ -518,6 +1009,16 @@ inline cudaError_t initializeDevicePointers(
     ret = cudaMemcpyToSymbol(d_height, &height, sizeof(int));
     ret = cudaMemcpyToSymbol(d_width, &width, sizeof(int));
     ret = cudaMemcpyToSymbol(d_layer, &z, sizeof(int));
+    ret = cudaMemcpyToSymbol(path_width, &path_widths, sizeof(frUInt4*));
+    ret = cudaMemcpyToSymbol(top_layer_num, &layer_num, sizeof(int));
+    ret = cudaMemcpyToSymbol(ggDRCCost, &p_ggDRCCost, sizeof(frUInt4));
+    ret = cudaMemcpyToSymbol(ggMarkerCost, &p_ggMarkerCost, sizeof(frUInt4));
+    ret = cudaMemcpyToSymbol(drWorker, &drWorker_ava, sizeof(bool));
+    ret = cudaMemcpyToSymbol(DRIter, &p_DRIter, sizeof(int));
+    ret = cudaMemcpyToSymbol(ripupMode, &p_ripupMode, sizeof(int));
+    ret = cudaMemcpyToSymbol(viaFOLen_size, &p_viaFOLen_size, sizeof(int));
+    ret = cudaMemcpyToSymbol(viaFLen_size, &p_viaFLen_size, sizeof(int));
+    ret = cudaMemcpyToSymbol(viaFTLen_size, &p_viaFTLen_size, sizeof(int));
     return ret;
 }
 
