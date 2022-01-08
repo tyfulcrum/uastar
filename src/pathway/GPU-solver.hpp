@@ -6,6 +6,7 @@
 #include <vector>
 #include <frCoreLangTypes.h>
 #include <dr/FlexMazeTypes.h>
+#include <db/infra/frPoint.h>
 
 using std::vector;
 using thrust::device_vector;
@@ -14,6 +15,7 @@ using ivec = vector<int>;
 using namespace coret;
 using fr::FlexMazeIdx;
 using coret::cuWavefrontGrid;
+using fr::frPoint;
 
 const int OPEN_LIST_SIZE = 10000000;
 const int NODE_LIST_SIZE = 150000000;
@@ -62,7 +64,8 @@ public:
     int test_estcost(FlexMazeIdx src, FlexMazeIdx dst1, FlexMazeIdx dst2, frDirEnum dir);
     int gpuKnows(int x, int y, int z);
     bool testhasEdge(int x, int y, int z, frDirEnum dir);
-    bool isEx(int x, int y, int z, frDirEnum dir);
+    bool isEx(int x, int y, int z, frDirEnum dir, frDirEnum lastdir);
+    void test_reverse(frMIdx &x, frMIdx &y, frMIdx &z, frDirEnum &dir);
     frDirEnum testDir(int x, int y, int z);
     void getSolution(float *optimal, vector<int> *pathList);
     cuWavefrontGrid test_expand(frDirEnum dir, cuWavefrontGrid &grid, 

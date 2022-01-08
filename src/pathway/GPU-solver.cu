@@ -104,12 +104,13 @@ int GPUPathwaySolver::gpuKnows(int x, int y, int z) {
   res = resvec[0];
   return res;
 }
-bool GPUPathwaySolver::isEx(int x, int y, int z, frDirEnum dir) {
+bool GPUPathwaySolver::isEx(int x, int y, int z, frDirEnum dir, 
+    frDirEnum lastdir) {
   bool res = false;
   device_vector<bool> resvec;
   resvec.push_back(false);
   auto res_ptr = thrust::raw_pointer_cast(&resvec[0]);
-  test_isex<<<1, 1>>>(res_ptr, x, y, z, dir);
+  test_isex<<<1, 1>>>(res_ptr, x, y, z, dir, lastdir);
   res = resvec[0];
   return res;
 }
@@ -119,7 +120,7 @@ bool GPUPathwaySolver::testhasEdge(int x, int y, int z, frDirEnum dir) {
   device_vector<bool> resvec;
   resvec.push_back(false);
   auto res_ptr = thrust::raw_pointer_cast(&resvec[0]);
-  hasEdge_test<<<1, 1>>>(res_ptr, x, y, z, dir);
+  test_isSrc<<<1, 1>>>(res_ptr, x, y, z);
   res = resvec[0];
   return res;
 }
@@ -134,14 +135,34 @@ frDirEnum GPUPathwaySolver::testDir(int x, int y, int z) {
   return res;
 }
 
+
+void GPUPathwaySolver::test_reverse(frMIdx &x, frMIdx &y, frMIdx &z, frDirEnum &dir) {
+  device_vector<frDirEnum> dir_vec;
+  dir_vec.push_back(dir);
+  device_vector<frMIdx> idx_vec;
+  idx_vec.push_back(x);
+  idx_vec.push_back(y);
+  idx_vec.push_back(z);
+  auto dir_ptr = thrust::raw_pointer_cast(&dir_vec[0]);
+  auto x_ptr = thrust::raw_pointer_cast(&idx_vec[0]);
+  auto y_ptr = x_ptr + 1; // thrust::raw_pointer_cast(&idx_vec[1]);
+  auto z_ptr = y_ptr + 1; // thrust::raw_pointer_cast(&idx_vec[2]);
+  test_cuReverse<<<1, 1>>>(x_ptr, y_ptr, z_ptr, dir_ptr, x, y, z);
+  x = idx_vec[0];
+  y = idx_vec[1];
+  z = idx_vec[2];
+  dir = dir_vec[0];
+}
+
 cuWavefrontGrid GPUPathwaySolver::test_expand(frDirEnum dir, cuWavefrontGrid &grid, 
     const FlexMazeIdx &dstMazeIdx1, const FlexMazeIdx &dstMazeIdx2, 
     const frPoint &centerPt) {
+  /*
   device_vector<cuWavefrontGrid> currgrid_vec;
   currgrid_vec.push_back(grid);
   device_vector<FlexMazeIdx> d_idx;
-  d_idx.push_back(dst1);
-  d_idx.push_back(dst2);
+  d_idx.push_back(dstMazeIdx1);
+  d_idx.push_back(dstMazeIdx2);
   device_vector<frPoint> ctrPt_vec;
   ctrPt_vec.push_back(centerPt);
   auto grid_ptr = raw_pointer_cast(&currgrid_vec[0]);
@@ -154,6 +175,8 @@ cuWavefrontGrid GPUPathwaySolver::test_expand(frDirEnum dir, cuWavefrontGrid &gr
   auto res_ptr = raw_pointer_cast(&resvec[0]);
   test_cuexpand<<<1, 1>>>(res_ptr, grid_ptr, dir, dst1_ptr, dst2_ptr, center_ptr);
   auto res = resvec[0];
+  */
+  auto res = cuWavefrontGrid(grid);
   return res;
 }
 

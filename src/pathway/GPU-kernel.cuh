@@ -250,7 +250,7 @@ __device__ bool hasEdge(frMIdx x, frMIdx y, frMIdx z, frDirEnum dir) {
   correct(x, y, z, dir);
   if (isValid(x, y, z)) {
     auto idx = getIdx(x, y, z);
-    printf("GPU getBit: %d\n", getBit(idx, 1));
+    // printf("GPU getBit: %d\n", getBit(idx, 1));
     switch (dir) {
       case frDirEnum::E:
         return getBit(idx, 0);
@@ -313,7 +313,7 @@ inline __device__ frDirEnum getPrevAstarNodeDir(frMIdx x, frMIdx y, frMIdx z) {
 }
 
 __global__ void hasEdge_test(bool *res, int x, int y, int z, frDirEnum dir) {
-  *res = hasGuide(x, y, z, dir);
+  *res = hasEdge(x, y, z, dir);
 }
 
 __device__ int cuStrcmp(const char *s1, const char *s2) {
@@ -325,22 +325,15 @@ __device__ int cuStrcmp(const char *s1, const char *s2) {
   return *(const unsigned char*)s1 - *(const unsigned char*)s2;
 }
 
-__device__ bool isExpandable(int x, int y, int z, frDirEnum gdir) {
+__device__ bool isExpandable(int x, int y, int z, frDirEnum dir, 
+    frDirEnum lastdir) {
   //bool enableOutput = true;
   bool enableOutput = false;
-  frDirEnum dir = frDirEnum::S;
   frMIdx gridX = x;
   frMIdx gridY = y;
   frMIdx gridZ = z;
   bool hg = hasEdge(gridX, gridY, gridZ, dir);
-  printf("GPU hasEdge: %d\n", hg);
-  char *s1 = "abcd";
-  char *s2 = "abc";
-  fr::FlexMazeIdx Idx(1, 2, 3);
-  Idx.set(2, 3, 1);
-  fr::frOrient(fr::frOrientEnum::frcMXR90);
-  fr::frPoint frpoint;
-  printf("GPU FlexMazeIdx: (%d, %d, %d)\n", Idx.x(), Idx.y(), Idx.z());
+  // printf("GPU hasEdge: %d\n", hg);
   /*
   if (enableOutput) {
     if (!hasEdge(gridX, gridY, gridZ, dir)) {
@@ -355,7 +348,7 @@ __device__ bool isExpandable(int x, int y, int z, frDirEnum gdir) {
   if (!hg || 
       isSrc(gridX, gridY, gridZ) || 
       (getPrevAstarNodeDir(gridX, gridY, gridZ) != frDirEnum::UNKNOWN) || // comment out for non-buffer enablement
-      gdir == dir) {
+      lastdir == dir) {
     return false;
   } else {
     return true;
@@ -858,12 +851,14 @@ __device__ cuWavefrontGrid expand(cuWavefrontGrid &dest,  cuWavefrontGrid &currG
   // get cost
   nextEstCost = getEstCost(nextIdx, dstMazeIdx1, dstMazeIdx2, dir);
   nextPathCost = getNextPathCost(currGrid, dir);  
+  /*
   if (enableOutput) {
     std::cout << "  expanding from (" << currGrid.x() << ", " << currGrid.y() << ", " << currGrid.z() 
               << ") [pathCost / totalCost = " << currGrid.getPathCost() << " / " << currGrid.getCost() << "] to "
               << "(" << gridX << ", " << gridY << ", " << gridZ << ") [pathCost / totalCost = " 
               << nextPathCost << " / " << nextPathCost + nextEstCost << "]\n";
   }
+  */
   auto lNum = getLayerNum(currGrid.z());
   auto pathWidth = path_width[lNum];
   frPoint currPt;
@@ -882,6 +877,7 @@ __device__ cuWavefrontGrid expand(cuWavefrontGrid &dest,  cuWavefrontGrid &currG
     nextVLengthY = 0;
     nextIsPrevViaUp = (dir == frDirEnum::D); // up via if current path goes down
   } else {
+    /*
     if (currVLengthX != std::numeric_limits<frCoord>::max() &&
         currVLengthY != std::numeric_limits<frCoord>::max()) {
       if (dir == frDirEnum::W || dir == frDirEnum::E) {
@@ -890,22 +886,23 @@ __device__ cuWavefrontGrid expand(cuWavefrontGrid &dest,  cuWavefrontGrid &currG
         nextVLengthY += getEdgeLength(currGrid.x(), currGrid.y(), currGrid.z(), dir);
       }
     }
+    */
   }
   
   // tlength calculation
   auto currTLength = currGrid.getTLength();
   auto nextTLength = currTLength;
   // if there was a turn, then add tlength
-  if (currTLength != std::numeric_limits<frCoord>::max()) {
-    nextTLength += getEdgeLength(currGrid.x(), currGrid.y(), currGrid.z(), dir);
-  }
+  // if (currTLength != std::numeric_limits<frCoord>::max()) {
+  //   nextTLength += getEdgeLength(currGrid.x(), currGrid.y(), currGrid.z(), dir);
+  // }
   // if current is a turn, then reset tlength
   if (currGrid.getLastDir() != frDirEnum::UNKNOWN && currGrid.getLastDir() != dir) {
     nextTLength = getEdgeLength(currGrid.x(), currGrid.y(), currGrid.z(), dir);
   }
   // if current is a via, then reset tlength
   if (dir == frDirEnum::U || dir == frDirEnum::D) {
-    nextTLength = std::numeric_limits<frCoord>::max();
+    // nextTLength = std::numeric_limits<frCoord>::max();
   }
 
   cuWavefrontGrid nextWavefrontGrid(gridX, gridY, gridZ, 
@@ -914,6 +911,7 @@ __device__ cuWavefrontGrid expand(cuWavefrontGrid &dest,  cuWavefrontGrid &currG
                                       nextTLength,
                                       currDist,
                                       nextPathCost, nextPathCost + nextEstCost, currGrid.getBackTraceBuffer());
+  /*
   if (dir == frDirEnum::U || dir == frDirEnum::D) {
     nextWavefrontGrid.resetLayerPathArea();
     nextWavefrontGrid.resetLength();
@@ -942,6 +940,7 @@ __device__ cuWavefrontGrid expand(cuWavefrontGrid &dest,  cuWavefrontGrid &currG
     // TODO:  add to wavefront
     // wavefront.push(nextWavefrontGrid);
   }
+  */
 
   return nextWavefrontGrid;
 }
@@ -970,12 +969,33 @@ __global__ void dtest_estcost(int *res, FlexMazeIdx *src,
   *res = getEstCost(*src, *dstMazeIdx1, *dstMazeIdx2, dir);
 }
 
-__global__ void test_isex(bool *res, int x, int y, int z, frDirEnum dir) {
-  *res = isExpandable(x, y, z, dir);
+__global__ void test_isex(bool *res, int x, int y, int z, frDirEnum dir, 
+    frDirEnum lastdir) {
+  *res = isExpandable(x, y, z, dir, lastdir);
 }
 
 __global__ void test_Dir(frDirEnum *res, int x, int y, int z) {
   *res = getPrevAstarNodeDir(x, y, z);
+}
+
+__global__ void test_cuReverse(frMIdx *x, frMIdx *y, frMIdx *z, frDirEnum *dir, 
+    frMIdx ix, frMIdx iy, frMIdx iz) {
+  auto rx = ix;
+  auto ry = iy;
+  auto rz = iz;
+  reverse(rx, ry, rz, *dir);
+  *x = rx;
+  *y = ry;
+  *z = rz;
+}
+
+__global__ void test_hasEdge(bool *res, 
+    frMIdx x, frMIdx y, frMIdx z, frDirEnum dir) {
+  *res = hasEdge(x, y, z, dir);
+}
+
+__global__ void test_isSrc(bool *res, frMIdx x, frMIdx y, frMIdx z) {
+  *res = isSrc(x, y, z);
 }
 
 __global__ void read_bool_vec(int *res, int x, int y, int z) {
@@ -985,7 +1005,7 @@ __global__ void read_bool_vec(int *res, int x, int y, int z) {
 __global__ void test_cuexpand(cuWavefrontGrid *res, cuWavefrontGrid *grid, frDirEnum dir, 
     const FlexMazeIdx *dstMazeIdx1, const FlexMazeIdx *dstMazeIdx2, 
     const frPoint *centerPt) {
-  *res = expand(*grid, dir, *dstMazeIdx1, *dstMazeIdx2, *centerPt);
+  *res = expand(*grid, *grid, dir, *dstMazeIdx1, *dstMazeIdx2, *centerPt);
 }
 
 inline cudaError_t initializeDevicePointers(
