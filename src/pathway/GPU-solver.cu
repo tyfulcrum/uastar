@@ -1,3 +1,7 @@
+#include <boost/test/utils/basic_cstring/basic_cstring_fwd.hpp>
+#include <cstddef>
+#include <cstdlib>
+#include <iterator>
 #include <vector>
 #define NO_CPP11
 
@@ -9,6 +13,7 @@
 #include "pathway/GPU-kernel.cuh"
 #include "utils.hpp"
 #include <fmt/core.h>
+#include <memory>
 
 bool debug = false;
 
@@ -17,6 +22,9 @@ using namespace mgpu;
 using thrust::raw_pointer_cast;
 
 int div_up(int x, int y) { return (x-1) / y + 1; }
+
+struct RoutingData {
+};
 
 struct DeviceData {
     // store the structure of the grid graph
@@ -63,6 +71,23 @@ struct DeviceData {
     MGPU_MEM(int) answerSize;
 
     ContextPtr context;
+  device_vector<unsigned long long> bits;
+  device_vector<bool> srcs;
+  device_vector<bool> prevDirs;
+  device_vector<bool> guides;
+  device_vector<bool> zDirs;
+  device_vector<int> xCoords;
+  device_vector<int> yCoords;
+  device_vector<int> zCoords;
+  device_vector<int> zHeights;
+  device_vector<frUInt4> path_widths;
+  device_vector<int> via2ViaForbOverlapLen;
+  device_vector<int> via2viaForbLen;
+  device_vector<int> viaForbiTurnLen;
+  device_vector<forBiddenRange_t *> overlap_addr;
+  device_vector<forBiddenRange_t *> len_addr;
+  device_vector<forBiddenRange_t *> turnlen_addr;
+  int forBiddenRange_layerNum;
 };
 
 
@@ -90,15 +115,64 @@ GPUPathwaySolver::~GPUPathwaySolver()
     //               << "gValue: " << nodes[hashValue].gValue << endl
     //               << "prev: " << px << ", " << py << endl << endl;;
     // }
-    delete d;
 
+  /*
+  for (size_t i = 0; i < d->forBiddenRange_layerNum; ++i) {
+    auto ranges = d->overlap_addr[i];
+    for (size_t j = 0; j < 8; ++j) {
+      auto range = ranges + j;
+      if (range->size > 0) {
+        cudaFree(range->data);
+      }
+      cudaFree(range);
+    }
+  }
+  */
+    delete d;
+}
+
+void GPUPathwaySolver::forBiddenRangesDataCpy(
+    device_vector<forBiddenRange_t *> &dest, 
+    vector<vector<vector<std::pair<frCoord, frCoord>>>> const &hostData) {
+    int const forBiddenRange_layerNum = (int) hostData.size();
+    size_t const dirNum = hostData[0].size();
+    cudaMemcpyToSymbol(d_forBiddenRange_layerNum, &forBiddenRange_layerNum, sizeof(int));
+    for (auto const &hostFbRanges: hostData) {
+      forBiddenRange_t deviceFbRanges[8];
+      for (int i = 0; i < dirNum; ++i) {
+        auto const &hostFbRange = hostFbRanges[i];
+        forBiddenRange_t dFbRange;
+        auto const payload_size = hostFbRange.size();
+        dFbRange.size = payload_size;
+        if (payload_size == 0) {
+          dFbRange.data = nullptr;
+        } else {
+          thrust::pair<frCoord, frCoord> *payload_ptr = nullptr;
+          cudaMalloc(&payload_ptr, sizeof(thrust::pair<frCoord, frCoord>) * payload_size);
+          dFbRange.data = payload_ptr;
+          auto insert_ptr = payload_ptr;
+          vector<thrust::pair<frCoord, frCoord>> thrust_pair_vector;
+          for (auto const &j: hostFbRange) {
+            thrust::pair<frCoord, frCoord> device_pair(j);
+            thrust_pair_vector.push_back(device_pair);
+          }
+          cudaMemcpy(insert_ptr, thrust_pair_vector.data(), sizeof(thrust::pair<frCoord, frCoord>) * payload_size, cudaMemcpyHostToDevice);
+        }
+        deviceFbRanges[i] = dFbRange;
+      }
+      forBiddenRange_t *ranges_ptr = nullptr;
+      cudaMalloc(&ranges_ptr, sizeof(forBiddenRange_t) * dirNum);
+      cudaMemcpy(ranges_ptr, deviceFbRanges, sizeof(forBiddenRange_t) * dirNum, cudaMemcpyHostToDevice);
+      // d->overlap_addr.push_back(ranges_ptr);
+      dest.push_back(ranges_ptr);
+    }
 }
 
 int GPUPathwaySolver::gpuKnows(int x, int y, int z) {
   int res = false;
   device_vector<int> resvec;
   resvec.push_back(0);
-  auto vec_data_ptr = thrust::raw_pointer_cast(&rd.zDirs[0]);
+  auto vec_data_ptr = thrust::raw_pointer_cast(&d->zDirs[0]);
   auto resvec_ptr = thrust::raw_pointer_cast(&resvec[0]);
   read_bool_vec<<<1, 1>>>(resvec_ptr, x, y, z);
   res = resvec[0];
@@ -189,6 +263,11 @@ frCost GPUPathwaySolver::test_npCost(frDirEnum dir, cuWavefrontGrid &grid) {
   return res;
 }
 
+
+void GPUPathwaySolver::printDeviceOverlapInfo(void){
+  test_print_device_overlap_info<<<1, 1>>>();
+}
+
 frCost GPUPathwaySolver::test_npCost(frDirEnum dir, 
 int xIn, int yIn, int zIn, frCoord layerPathAreaIn, 
           frCoord vLengthXIn, frCoord vLengthYIn,
@@ -212,20 +291,14 @@ int xIn, int yIn, int zIn, frCoord layerPathAreaIn,
   return res;
 }
 
-int GPUPathwaySolver::test_estcost(FlexMazeIdx src, FlexMazeIdx dst1, FlexMazeIdx dst2, frDirEnum dir) {
-    device_vector<int> resvec;
-    device_vector<FlexMazeIdx> d_idx;
-    d_idx.push_back(src);
-    d_idx.push_back(dst1);
-    d_idx.push_back(dst2);
-    resvec.push_back(0);
-    auto res_ptr = raw_pointer_cast(&resvec[0]);
-    auto src_ptr = raw_pointer_cast(&d_idx[0]);
-    auto dst1_ptr = src_ptr + 1;
-    auto dst2_ptr = src_ptr + 2;
-    dtest_estcost<<<1, 1>>>(res_ptr, src_ptr, dst1_ptr, dst2_ptr, dir);
-    auto res = resvec[0];
-    return res;
+frCost GPUPathwaySolver::test_estcost(FlexMazeIdx src, FlexMazeIdx dst1, FlexMazeIdx dst2, frDirEnum dir) {
+  frCost res[1];
+  frCost *d_res = nullptr;
+  cudaMalloc(&d_res, sizeof(frCost));
+  dtest_estcost<<<1, 1>>>(d_res, src, dst1, dst2, dir);
+  cudaMemcpy(res, d_res, sizeof(frCost), cudaMemcpyDeviceToHost);
+  cudaFree(d_res);
+  return res[0];
 }
 
 void GPUPathwaySolver::initialize(const vector<unsigned long long> &bits, 
@@ -237,7 +310,11 @@ void GPUPathwaySolver::initialize(const vector<unsigned long long> &bits,
         const ivec &via2ViaForbOverlapLen, const ivec &via2viaForbLen, 
         const ivec &viaForbiTurnLen, 
         bool drWorker_ava, int DRIter, int ripupMode, 
-        int p_viaFOLen_size, int p_viaFLen_size, int p_viaFTLen_size
+        int p_viaFOLen_size, int p_viaFLen_size, int p_viaFTLen_size, 
+        vector<vector<vector<pair<frCoord, frCoord>>>> const &Via2ViaForbiddenOverlapLen, 
+        vector<vector<vector<pair<frCoord, frCoord>>>> const &Via2ViaForbiddenLen,
+        vector<vector<vector<pair<frCoord, frCoord>>>> const &ViaForbiddenTurnLen, 
+        std::string DBPROCESSNODE_p, frLayerNum topLayerNum_p
         )
 {
     cudaDeviceSynchronize();
@@ -245,52 +322,69 @@ void GPUPathwaySolver::initialize(const vector<unsigned long long> &bits,
 
     d->context = CreateCudaDevice(0);
 
-    rd.bits = bits;
-    rd.prevDirs = prevDirs;
-    rd.srcs = srcs;
-    rd.guides = guides;
-    rd.zDirs = zDirs;
-    rd.xCoords = xCoords;
-    rd.yCoords = yCoords;
-    rd.zCoords = zCoords;
-    rd.zHeights= zHeights;
-    rd.path_widths = path_widths;
-    rd.via2ViaForbOverlapLen = via2ViaForbOverlapLen;
-    rd.via2viaForbLen = via2viaForbLen;
-    rd.viaForbiTurnLen = viaForbiTurnLen;
+    d->bits = bits;
+    d->prevDirs = prevDirs;
+    d->srcs = srcs;
+    d->guides = guides;
+    d->zDirs = zDirs;
+    d->xCoords = xCoords;
+    d->yCoords = yCoords;
+    d->zCoords = zCoords;
+    d->zHeights= zHeights;
+    d->path_widths = path_widths;
+    d->via2ViaForbOverlapLen = via2ViaForbOverlapLen;
+    d->via2viaForbLen = via2viaForbLen;
+    d->viaForbiTurnLen = viaForbiTurnLen;
 
     int x = xCoords.size();
     int y = yCoords.size();
     int z = zCoords.size();
-    int layer_num = path_widths.size();
 
-    auto bits_ptr = raw_pointer_cast(&rd.bits[0]);
-    auto prevDirs_ptr = raw_pointer_cast(&rd.prevDirs[0]);
-    auto srcs_ptr = raw_pointer_cast(&rd.srcs[0]);
-    auto guides_ptr = raw_pointer_cast(&rd.guides[0]);
-    auto zdirs_ptr = raw_pointer_cast(&rd.zDirs[0]);
-    auto xCoords_ptr = raw_pointer_cast(&rd.xCoords[0]);
-    auto yCoords_ptr = raw_pointer_cast(&rd.yCoords[0]);
-    auto zCoords_ptr = raw_pointer_cast(&rd.zCoords[0]);
-    auto zHeights_ptr = raw_pointer_cast(&rd.zHeights[0]);
-    auto path_widths_ptr = raw_pointer_cast(&rd.path_widths[0]);
-    auto vfol_ptr = raw_pointer_cast(&rd.via2ViaForbOverlapLen[0]);
-    auto v2vfl_ptr = raw_pointer_cast(&rd.via2viaForbLen[0]);
-    auto vftl_ptr = raw_pointer_cast(&rd.viaForbiTurnLen[0]);
+    auto bits_ptr = raw_pointer_cast(&d->bits[0]);
+    auto prevDirs_ptr = raw_pointer_cast(&d->prevDirs[0]);
+    auto srcs_ptr = raw_pointer_cast(&d->srcs[0]);
+    auto guides_ptr = raw_pointer_cast(&d->guides[0]);
+    auto zdirs_ptr = raw_pointer_cast(&d->zDirs[0]);
+    auto xCoords_ptr = raw_pointer_cast(&d->xCoords[0]);
+    auto yCoords_ptr = raw_pointer_cast(&d->yCoords[0]);
+    auto zCoords_ptr = raw_pointer_cast(&d->zCoords[0]);
+    auto zHeights_ptr = raw_pointer_cast(&d->zHeights[0]);
+    auto path_widths_ptr = raw_pointer_cast(&d->path_widths[0]);
+    auto vfol_ptr = raw_pointer_cast(&d->via2ViaForbOverlapLen[0]);
+    auto v2vfl_ptr = raw_pointer_cast(&d->via2viaForbLen[0]);
+    auto vftl_ptr = raw_pointer_cast(&d->viaForbiTurnLen[0]);
 
+
+
+    d->forBiddenRange_layerNum = (int) Via2ViaForbiddenOverlapLen.size();
+    cudaMemcpyToSymbol(d_forBiddenRange_layerNum, &d->forBiddenRange_layerNum, sizeof(int));
+    forBiddenRangesDataCpy(d->overlap_addr, Via2ViaForbiddenOverlapLen);
+    forBiddenRangesDataCpy(d->len_addr, Via2ViaForbiddenLen);
+    forBiddenRangesDataCpy(d->turnlen_addr, ViaForbiddenTurnLen);
+    auto overlap_addr_ptr = raw_pointer_cast(&d->overlap_addr[0]);
+    auto len_addr_ptr = raw_pointer_cast(&d->len_addr[0]);
+    auto turnlen_addr_ptr = raw_pointer_cast(&d->turnlen_addr[0]);
+
+    auto const strSize = DBPROCESSNODE_p.length() + 1;
+    char const *str = nullptr;
+    cudaMalloc(&str, sizeof(char) * strSize);
+    cudaMemcpyToSymbol(DBPROCESSNODE, &str, sizeof(char *));
+
+    cudaMemcpyToSymbol(topLayerNum, &topLayerNum_p, sizeof(frLayerNum));
 
     initializeDevicePointers(bits_ptr, prevDirs_ptr, srcs_ptr, guides_ptr, zdirs_ptr,
         xCoords_ptr, yCoords_ptr, zCoords_ptr, zHeights_ptr, x, y, z,
-        path_widths_ptr, layer_num, ggDRCCost, ggMarkerCost, 
+        path_widths_ptr, ggDRCCost, ggMarkerCost, 
         drWorker, DRIter, ripupMode, 
-        p_viaFOLen_size, p_viaFLen_size, p_viaFTLen_size);
-
+        p_viaFOLen_size, p_viaFLen_size, p_viaFTLen_size, 
+        overlap_addr_ptr, len_addr_ptr, turnlen_addr_ptr);
+    // new array and copy
     /*
-    initializeCUDAConstantMemory(
-        p->height(), p->width(), p->layer(), p->ex(), p->ey(), p->ez(), 
-        (uint32_t)p->toID(p->ex(), p->ey(), p->ez()));
+       initializeCUDAConstantMemory(
+       p->height(), p->width(), p->layer(), p->ex(), p->ey(), p->ez(), 
+       (uint32_t)p->toID(p->ex(), p->ey(), p->ez()));
 
-    d->graph = d->context->Malloc<uint8_t>(p->graph(), p->size());
+       d->graph = d->context->Malloc<uint8_t>(p->graph(), p->size());
 
     d->nodes = d->context->Malloc<node_t>(NODE_LIST_SIZE);
     d->nodeSize = d->context->Fill<int>(1, 1);

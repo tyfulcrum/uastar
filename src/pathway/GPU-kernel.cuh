@@ -14,10 +14,13 @@
 #include <db/infra/frPoint.h>
 #include <db/infra/frOrient.h>
 #include <climits>
+#include <thrust/device_vector.h>
+#include <thrust/pair.h>
 using namespace coret;
 using frPoint = fr::frPoint;
 using FlexMazeIdx = fr::FlexMazeIdx;
 #define GRIDGRAPHDRCCOSTSIZE 8
+int const BOTTOM_ROUTING_LAYER = 2;
 
 // Suppose we only use x dimension
 #define THREAD_ID (threadIdx.x)
@@ -47,6 +50,12 @@ __host__ __device__ bool operator>(const heap_t &a, const heap_t &b)
 {
     return a.fValue > b.fValue;
 }
+
+
+struct forBiddenRange_t {
+  size_t size;
+  thrust::pair<frCoord, frCoord> *data;
+};
 
 struct node_t {
     uint32_t prev;
@@ -118,7 +127,6 @@ __constant__ frUInt4 ggMarkerCost;
 __device__ frPrefRoutingDirEnum *pref_dirs;
 __device__ int *pitch;
 __device__ frUInt4 *path_width;
-__constant__ int top_layer_num;
 
 /* Tech info */
 __device__ int *via2ViaForbiddenOverlapLen;
@@ -129,6 +137,13 @@ __constant__ int via_sizeX;
 __constant__ int viaFOLen_size;
 __constant__ int viaFLen_size;
 __constant__ int viaFTLen_size;
+
+__constant__ int d_forBiddenRange_layerNum;
+__device__ forBiddenRange_t **overlap_data_addr;
+__device__ forBiddenRange_t **len_data_addr;
+__device__ forBiddenRange_t **turnlen_data_addr;
+__constant__ char *DBPROCESSNODE;
+__constant__ frLayerNum topLayerNum;
 
 
 
@@ -421,33 +436,37 @@ inline __device__ int getTableEntryIdx(bool in1, bool in2, bool in3) {
   return retIdx;
 }
 
-inline __device__ bool isIncluded(const int *intervals, int len) {
-  if (intervals != nullptr) {
-    auto first = intervals[0];
-    auto second = intervals[1];
-    if (first <= len && second >= len) {
-      printf("isIncluded OK!\n");
-      return true;
+inline __device__ bool isIncluded(
+    forBiddenRange_t const &intervals, 
+    frCoord len) {
+  bool included = false;
+  size_t const size = intervals.size;
+  if (size > 0) {
+    for (size_t i = 0; i < size; ++i) {
+      auto const &interval = *(intervals.data + i);
+      if (interval.first <= len && interval.second >= len) {
+        included = true;
+        break;
+      }
     }
   }
-  return false;
+  return included;
 }
 
-// forbidden length table related 
-inline __device__ bool isVia2ViaForbiddenLen(int tableLayerIdx, bool isPrevDown, bool isCurrDown, bool isCurrDirX, frCoord len, bool isOverlap = false) {
+__device__ bool isVia2ViaForbiddenLen(int tableLayerIdx, bool isPrevDown, 
+    bool isCurrDown, bool isCurrDirX, frCoord len, bool isOverlap = false) {
   int tableEntryIdx = getTableEntryIdx(!isPrevDown, !isCurrDown, !isCurrDirX);
   if (isOverlap) {
-    return isIncluded(via2ViaForbiddenOverlapLen + (tableLayerIdx * viaFOLen_size * 2 + tableEntryIdx * 2), len);
+    return isIncluded(*(*(overlap_data_addr+tableLayerIdx) + tableEntryIdx), len);
   } else {
-    return isIncluded(via2ViaForbiddenLen + (tableLayerIdx * viaFLen_size * 2 + tableEntryIdx * 2), len);
+    return isIncluded(*(*(len_data_addr+tableLayerIdx) + tableEntryIdx), len);
   }
 }
 
-__device__ bool isViaForbiddenTurnLen(int tableLayerIdx, bool isDown, bool isCurrDirX, frCoord len) {
+__device__ bool isViaForbiddenTurnLen(int tableLayerIdx, bool isDown, 
+    bool isCurrDirX, frCoord len) {
   int tableEntryIdx = getTableEntryIdx(!isDown, !isCurrDirX);
-  // printf("viaFTL!\n");
-  // printf("viaFTLen_size: %d\n", viaFLen_size);
-  return isIncluded(viaForbiddenTurnLen /*+ (tableLayerIdx * 4 * 2 + tableEntryIdx * 2)*/, len);
+  return isIncluded(*(*(turnlen_data_addr+tableLayerIdx) + tableEntryIdx), len);
 }
 
 __device__ frCost getEstCost(const FlexMazeIdx &src, const FlexMazeIdx &dstMazeIdx1,
@@ -469,15 +488,16 @@ __device__ frCost getEstCost(const FlexMazeIdx &src, const FlexMazeIdx &dstMazeI
   bendCnt += (minCostY && dir != frDirEnum::UNKNOWN && dir != frDirEnum::S && dir != frDirEnum::N) ? 1 : 0;
   bendCnt += (minCostZ && dir != frDirEnum::UNKNOWN && dir != frDirEnum::U && dir != frDirEnum::D) ? 1 : 0;
 
+  // printf("device est cost = %d\n", minCostX + minCostY + minCostZ + bendCnt);
   int gridX = src.x();
   int gridY = src.y();
   int gridZ = src.z();
   getNextGrid(gridX, gridY, gridZ, dir);
   frPoint nextPoint;
   getPoint(nextPoint, gridX, gridY);
-/*
+  // printf("DB data from device: %s\n", DBPROCESSNODE);
   // avoid propagating to location that will cause fobidden via spacing to boundary pin
-  if (DBPROCESSNODE == "GF14_13M_3Mx_2Cx_4Kx_2Hx_2Gx_LB") {
+  if (cuStrcmp(DBPROCESSNODE, "GF14_13M_3Mx_2Cx_4Kx_2Hx_2Gx_LB") == 0) {
     if (DRIter >= 30 && ripupMode == 0) {
       if (dstMazeIdx1 == dstMazeIdx2 && gridZ == dstMazeIdx1.z()) {
         auto layerNum = (gridZ + 1) * 2;
@@ -486,23 +506,24 @@ __device__ frCost getEstCost(const FlexMazeIdx &src, const FlexMazeIdx &dstMazeI
           auto gap = abs(nextPoint.y() - dstPoint1.y());
           if (gap &&
               (isVia2ViaForbiddenLen(gridZ, false, false, false, gap, false) || layerNum - 2 < BOTTOM_ROUTING_LAYER) &&
-              (isVia2ViaForbiddenLen(gridZ, true, true, false, gap, false) || layerNum + 2 > top_layer_num)) {
+              (isVia2ViaForbiddenLen(gridZ, true, true, false, gap, false) || layerNum + 2 > topLayerNum)) {
             forbiddenPenalty = pitch[layerNum] * ggDRCCost * 20;
           }
         } else {
           auto gap = abs(nextPoint.x() - dstPoint1.x());
           if (gap &&
-              (getDesign()->getTech()->isVia2ViaForbiddenLen(gridZ, false, false, true, gap, false) || layerNum - 2 < BOTTOM_ROUTING_LAYER) &&
-              (getDesign()->getTech()->isVia2ViaForbiddenLen(gridZ, true, true, true, gap, false) || layerNum + 2 > getDesign()->getTech()->getTopLayerNum())) {
+              (isVia2ViaForbiddenLen(gridZ, false, false, true, gap, false) || layerNum - 2 < BOTTOM_ROUTING_LAYER) &&
+              (isVia2ViaForbiddenLen(gridZ, true, true, true, gap, false) || layerNum + 2 > topLayerNum)) {
             forbiddenPenalty = pitch[layerNum] * ggDRCCost * 20;
           }
         }
       }
     }
   }
-*/
 
-  return (minCostX + minCostY + minCostZ + bendCnt + forbiddenPenalty);
+  auto const result = minCostX + minCostY + minCostZ + bendCnt + forbiddenPenalty;
+  // printf("result from device: %u\n", result);
+  return result;
 }
 inline __device__ bool hasGridCostE(frMIdx x, frMIdx y, frMIdx z) {
   return getBit(getIdx(x, y, z), 12);
@@ -963,10 +984,11 @@ int xIn, int yIn, int zIn, frCoord layerPathAreaIn,
   *res = getNextPathCost(grid, dir);
 }
 
-
-__global__ void dtest_estcost(int *res, FlexMazeIdx *src, 
-    FlexMazeIdx *dstMazeIdx1, FlexMazeIdx *dstMazeIdx2, frDirEnum dir) {
-  *res = getEstCost(*src, *dstMazeIdx1, *dstMazeIdx2, dir);
+__global__ void dtest_estcost(frCost *res, FlexMazeIdx src, 
+    FlexMazeIdx dstMazeIdx1, FlexMazeIdx dstMazeIdx2, frDirEnum dir) {
+  auto const result = getEstCost(src, dstMazeIdx1, dstMazeIdx2, dir);
+  // printf("Result from device: %u\n", result);
+  *res = result;
 }
 
 __global__ void test_isex(bool *res, int x, int y, int z, frDirEnum dir, 
@@ -1008,12 +1030,37 @@ __global__ void test_cuexpand(cuWavefrontGrid *res, cuWavefrontGrid *grid, frDir
   *res = expand(*grid, *grid, dir, *dstMazeIdx1, *dstMazeIdx2, *centerPt);
 }
 
+__global__ void test_print_device_overlap_info(void) {
+  int layerNum = d_forBiddenRange_layerNum;
+  auto fbRanges_ptr = overlap_data_addr;
+  printf("============Device Data==============\n");
+  printf("Layer Num: %d\n", layerNum);
+  for (int i = 0; i < layerNum; ++i, ++fbRanges_ptr) {
+    // printf("Layer No.%d:\n", i);
+    auto fbRanges = *fbRanges_ptr;
+    for (int j = 0; j < 8; ++j) {
+      // printf("Direction: %d:\n", j);
+      auto p = fbRanges[j];
+      if (p.size > 0) {
+        for (size_t k = 0; k < p.size; ++k) {
+          auto range = p.data[k];
+          printf("[%d][%d](%d, %d) ", i, j,  range.first, range.second);
+        }
+        printf("\n");
+      }
+    }
+  }
+  printf("============Device Data END==============\n");
+}
+
 inline cudaError_t initializeDevicePointers(
     unsigned long long *bits, bool *prevDirs, bool *srcs, bool *guides, bool *zDirs, 
     int *d_xCoords, int *d_yCoords, int *d_zCoords, int *d_zHeights, int height, 
-    int width, int z, frUInt4 *path_widths, int layer_num, frUInt4 p_ggDRCCost, 
+    int width, int z, frUInt4 *path_widths, frUInt4 p_ggDRCCost, 
     frUInt4 p_ggMarkerCost, bool drWorker_ava, int p_DRIter, int p_ripupMode, 
-    int p_viaFOLen_size, int p_viaFLen_size, int p_viaFTLen_size
+    int p_viaFOLen_size, int p_viaFLen_size, int p_viaFTLen_size, 
+    forBiddenRange_t **p_overlap_addr_ptr, forBiddenRange_t **p_len_addr_ptr, 
+    forBiddenRange_t **p_turnlen_addr_ptr
 )
 {
     cudaError_t ret = cudaSuccess;
@@ -1030,7 +1077,6 @@ inline cudaError_t initializeDevicePointers(
     ret = cudaMemcpyToSymbol(d_width, &width, sizeof(int));
     ret = cudaMemcpyToSymbol(d_layer, &z, sizeof(int));
     ret = cudaMemcpyToSymbol(path_width, &path_widths, sizeof(frUInt4*));
-    ret = cudaMemcpyToSymbol(top_layer_num, &layer_num, sizeof(int));
     ret = cudaMemcpyToSymbol(ggDRCCost, &p_ggDRCCost, sizeof(frUInt4));
     ret = cudaMemcpyToSymbol(ggMarkerCost, &p_ggMarkerCost, sizeof(frUInt4));
     ret = cudaMemcpyToSymbol(drWorker, &drWorker_ava, sizeof(bool));
@@ -1039,6 +1085,9 @@ inline cudaError_t initializeDevicePointers(
     ret = cudaMemcpyToSymbol(viaFOLen_size, &p_viaFOLen_size, sizeof(int));
     ret = cudaMemcpyToSymbol(viaFLen_size, &p_viaFLen_size, sizeof(int));
     ret = cudaMemcpyToSymbol(viaFTLen_size, &p_viaFTLen_size, sizeof(int));
+    ret = cudaMemcpyToSymbol(overlap_data_addr, &p_overlap_addr_ptr, sizeof(forBiddenRange_t **));
+    ret = cudaMemcpyToSymbol(len_data_addr, &p_len_addr_ptr, sizeof(forBiddenRange_t **));
+    ret = cudaMemcpyToSymbol(turnlen_data_addr, &p_turnlen_addr_ptr, sizeof(forBiddenRange_t **));
     return ret;
 }
 
