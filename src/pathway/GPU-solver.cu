@@ -276,19 +276,14 @@ int xIn, int yIn, int zIn, frCoord layerPathAreaIn,
           unsigned int backTraceBuffer
    ) {
 
-  /*
-  device_vector<cuWavefrontGrid> cuGrid;
-  cuGrid.push_back(grid);
-  fmt::print("cuGrid push over!\n");
-  auto grid_ptr = raw_pointer_cast(&cuGrid[0]);
-  */
-  device_vector<frCost> resvec;
-  resvec.push_back(0);
-  auto res_ptr = raw_pointer_cast(&resvec[0]);
-  test_getNCost<<<1, 1>>>(res_ptr, dir, xIn, yIn, zIn, layerPathAreaIn, vLengthXIn, vLengthYIn, 
+  frCost res[1];
+  frCost *d_res = nullptr;
+  cudaMalloc(&d_res, sizeof(frCost));
+  test_getNCost<<<1, 1>>>(d_res, dir, xIn, yIn, zIn, layerPathAreaIn, vLengthXIn, vLengthYIn, 
       prevViaUpIn, tLengthIn, distIn, pathCostIn, costIn, backTraceBuffer);
-  auto res = resvec[0];
-  return res;
+  cudaMemcpy(res, d_res, sizeof(frCost), cudaMemcpyDeviceToHost);
+  cudaFree(d_res);
+  return res[0];
 }
 
 frCost GPUPathwaySolver::test_estcost(FlexMazeIdx src, FlexMazeIdx dst1, FlexMazeIdx dst2, frDirEnum dir) {

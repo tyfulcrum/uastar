@@ -738,7 +738,7 @@ __device__ frCost getNextPathCost(const cuWavefrontGrid &currGrid, const frDirEn
       }
     }
   }
-  // printf("GPU ok with (%d, %d, %d)\n", gridX, gridY, gridZ);
+  //printf("GPU ok with (%d, %d, %d)\n", gridX, gridY, gridZ);
 
   // via2turn forbidden len enablement
   frCoord tLength    = INT_MAX;
@@ -824,6 +824,7 @@ __device__ frCost getNextPathCost(const cuWavefrontGrid &currGrid, const frDirEn
     + (shapeCost  ? SHAPECOST        * getEdgeLength(gridX, gridY, gridZ, dir) : 0)
     + (blockCost  ? BLOCKCOST        * pathWidth * 20                          : 0)
     + (!guideCost ? GUIDECOST        * getEdgeLength(gridX, gridY, gridZ, dir) : 0);
+  // printf("Are you OK? \n");
   /*
   if (enableOutput) {
     cout <<"edge grid/shape/drc/marker/blk/length = " 
@@ -981,7 +982,8 @@ int xIn, int yIn, int zIn, frCoord layerPathAreaIn,
     ) {
   cuWavefrontGrid grid(xIn, yIn, zIn, layerPathAreaIn, vLengthXIn, vLengthYIn, 
       prevViaUpIn, tLengthIn, distIn, pathCostIn, costIn, backTraceBufferIn);
-  *res = getNextPathCost(grid, dir);
+  auto const result = getNextPathCost(grid, dir);
+  *res = result;
 }
 
 __global__ void dtest_estcost(frCost *res, FlexMazeIdx src, 
