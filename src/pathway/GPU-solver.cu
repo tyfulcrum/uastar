@@ -87,6 +87,7 @@ struct DeviceData {
   device_vector<forBiddenRange_t *> overlap_addr;
   device_vector<forBiddenRange_t *> len_addr;
   device_vector<forBiddenRange_t *> turnlen_addr;
+  forBiddenRange_t halfViaEncArea;
   int forBiddenRange_layerNum;
 };
 
@@ -131,6 +132,27 @@ GPUPathwaySolver::~GPUPathwaySolver()
     delete d;
 }
 
+forBiddenRange_t GPUPathwaySolver::vectorPairCpy(
+    vector<std::pair<frCoord, frCoord>> const &hostData) {
+  forBiddenRange_t cuVecPair;
+  auto const payload_size = hostData.size();
+  cuVecPair.size = payload_size;
+  if (payload_size == 0) {
+    cuVecPair.data = nullptr;
+  } else {
+    thrust::pair<frCoord, frCoord> *payload_ptr = nullptr;
+    cudaMalloc(&payload_ptr, sizeof(thrust::pair<frCoord, frCoord>) * payload_size);
+    cuVecPair.data = payload_ptr;
+    vector<thrust::pair<frCoord, frCoord>> thrust_pair_vector;
+    for (auto const &j: hostData) {
+      thrust::pair<frCoord, frCoord> device_pair(j);
+      thrust_pair_vector.push_back(device_pair);
+    }
+    cudaMemcpy(payload_ptr, thrust_pair_vector.data(), sizeof(thrust::pair<frCoord, frCoord>) * payload_size, cudaMemcpyHostToDevice);
+  }
+  return cuVecPair;
+}
+
 void GPUPathwaySolver::forBiddenRangesDataCpy(
     device_vector<forBiddenRange_t *> &dest, 
     vector<vector<vector<std::pair<frCoord, frCoord>>>> const &hostData) {
@@ -140,30 +162,11 @@ void GPUPathwaySolver::forBiddenRangesDataCpy(
     for (auto const &hostFbRanges: hostData) {
       forBiddenRange_t deviceFbRanges[8];
       for (int i = 0; i < dirNum; ++i) {
-        auto const &hostFbRange = hostFbRanges[i];
-        forBiddenRange_t dFbRange;
-        auto const payload_size = hostFbRange.size();
-        dFbRange.size = payload_size;
-        if (payload_size == 0) {
-          dFbRange.data = nullptr;
-        } else {
-          thrust::pair<frCoord, frCoord> *payload_ptr = nullptr;
-          cudaMalloc(&payload_ptr, sizeof(thrust::pair<frCoord, frCoord>) * payload_size);
-          dFbRange.data = payload_ptr;
-          auto insert_ptr = payload_ptr;
-          vector<thrust::pair<frCoord, frCoord>> thrust_pair_vector;
-          for (auto const &j: hostFbRange) {
-            thrust::pair<frCoord, frCoord> device_pair(j);
-            thrust_pair_vector.push_back(device_pair);
-          }
-          cudaMemcpy(insert_ptr, thrust_pair_vector.data(), sizeof(thrust::pair<frCoord, frCoord>) * payload_size, cudaMemcpyHostToDevice);
-        }
-        deviceFbRanges[i] = dFbRange;
+        deviceFbRanges[i] = vectorPairCpy(hostFbRanges[i]);
       }
       forBiddenRange_t *ranges_ptr = nullptr;
       cudaMalloc(&ranges_ptr, sizeof(forBiddenRange_t) * dirNum);
       cudaMemcpy(ranges_ptr, deviceFbRanges, sizeof(forBiddenRange_t) * dirNum, cudaMemcpyHostToDevice);
-      // d->overlap_addr.push_back(ranges_ptr);
       dest.push_back(ranges_ptr);
     }
 }
@@ -263,6 +266,15 @@ frCost GPUPathwaySolver::test_npCost(frDirEnum dir, cuWavefrontGrid &grid) {
   return res;
 }
 
+frCoord GPUPathwaySolver::dtest_half(frMIdx z, bool f) {
+  device_vector<frCoord> res;
+  res.push_back(0);
+  auto res_ptr = raw_pointer_cast(&res[0]);
+  test_halfviaenc<<<1, 1>>>(res_ptr, z, f);
+  auto hres = res[0];
+  return hres;
+}
+
 
 void GPUPathwaySolver::printDeviceOverlapInfo(void){
   test_print_device_overlap_info<<<1, 1>>>();
@@ -309,6 +321,7 @@ void GPUPathwaySolver::initialize(const vector<unsigned long long> &bits,
         vector<vector<vector<pair<frCoord, frCoord>>>> const &Via2ViaForbiddenOverlapLen, 
         vector<vector<vector<pair<frCoord, frCoord>>>> const &Via2ViaForbiddenLen,
         vector<vector<vector<pair<frCoord, frCoord>>>> const &ViaForbiddenTurnLen, 
+        vector<std::pair<frCoord, frCoord>> const &halfViaEncArea_p, 
         std::string DBPROCESSNODE_p, frLayerNum topLayerNum_p
         )
 {
@@ -359,6 +372,9 @@ void GPUPathwaySolver::initialize(const vector<unsigned long long> &bits,
     auto overlap_addr_ptr = raw_pointer_cast(&d->overlap_addr[0]);
     auto len_addr_ptr = raw_pointer_cast(&d->len_addr[0]);
     auto turnlen_addr_ptr = raw_pointer_cast(&d->turnlen_addr[0]);
+
+    d->halfViaEncArea = vectorPairCpy(halfViaEncArea_p);
+    cudaMemcpyToSymbol(halfViaEncArea, &d->halfViaEncArea, sizeof(forBiddenRange_t));
 
     auto const strSize = DBPROCESSNODE_p.length() + 1;
     char const *str = nullptr;

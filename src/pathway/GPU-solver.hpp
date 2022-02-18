@@ -52,9 +52,11 @@ public:
         vector<vector<vector<std::pair<frCoord, frCoord>>>> const &Via2ViaForbiddenOverlapLen, 
         vector<vector<vector<std::pair<frCoord, frCoord>>>> const &Via2ViaForbiddenLen,
         vector<vector<vector<std::pair<frCoord, frCoord>>>> const &ViaForbiddenTurnLen, 
+        vector<std::pair<frCoord, frCoord>> const &halfViaEncArea, 
         std::string DBPROCESSNODE, frLayerNum topLayerNum_p);
     bool solve();
     frCost test_estcost(FlexMazeIdx src, FlexMazeIdx dst1, FlexMazeIdx dst2, frDirEnum dir);
+    frCoord dtest_half(frMIdx z, bool f);
     int gpuKnows(int x, int y, int z);
     bool testhasEdge(int x, int y, int z, frDirEnum dir);
     bool isEx(int x, int y, int z, frDirEnum dir, frDirEnum lastdir);
@@ -74,6 +76,7 @@ public:
 
 private:
 
+    forBiddenRange_t vectorPairCpy(vector<std::pair<frCoord, frCoord>> const &hostData);
     void forBiddenRangesDataCpy(
         device_vector<forBiddenRange_t *> &dest, 
         vector<vector<vector<std::pair<frCoord, frCoord>>>> const &hostData);

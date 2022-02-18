@@ -51,7 +51,6 @@ __host__ __device__ bool operator>(const heap_t &a, const heap_t &b)
     return a.fValue > b.fValue;
 }
 
-
 struct forBiddenRange_t {
   size_t size;
   thrust::pair<frCoord, frCoord> *data;
@@ -142,6 +141,7 @@ __constant__ int d_forBiddenRange_layerNum;
 __device__ forBiddenRange_t **overlap_data_addr;
 __device__ forBiddenRange_t **len_data_addr;
 __device__ forBiddenRange_t **turnlen_data_addr;
+__constant__ forBiddenRange_t halfViaEncArea;
 __constant__ char *DBPROCESSNODE;
 __constant__ frLayerNum topLayerNum;
 
@@ -857,6 +857,13 @@ __device__ FlexMazeIdx getTailIdx(const FlexMazeIdx &currIdx, const cuWavefrontG
   return FlexMazeIdx(gridX, gridY, gridZ);
 }
 
+
+__device__ frCoord getHalfViaEncArea(frMIdx z, bool isLayer1) {
+  // printf("First: %d, Second: %d\n", halfViaEncArea.data[z].first, 
+  //     halfViaEncArea.data[z].second);
+  return (isLayer1 ? halfViaEncArea.data[z].first: halfViaEncArea.data[z].second);
+}
+
 __device__ cuWavefrontGrid expand(cuWavefrontGrid &dest,  cuWavefrontGrid &currGrid, const frDirEnum &dir, 
                                       const FlexMazeIdx &dstMazeIdx1, const FlexMazeIdx &dstMazeIdx2,
                                       const frPoint &centerPt) {
@@ -899,32 +906,30 @@ __device__ cuWavefrontGrid expand(cuWavefrontGrid &dest,  cuWavefrontGrid &currG
     nextVLengthY = 0;
     nextIsPrevViaUp = (dir == frDirEnum::D); // up via if current path goes down
   } else {
-    /*
-    if (currVLengthX != std::numeric_limits<frCoord>::max() &&
-        currVLengthY != std::numeric_limits<frCoord>::max()) {
+    if (currVLengthX != INT_MAX &&
+        currVLengthY != INT_MAX) {
       if (dir == frDirEnum::W || dir == frDirEnum::E) {
         nextVLengthX += getEdgeLength(currGrid.x(), currGrid.y(), currGrid.z(), dir);
       } else { 
         nextVLengthY += getEdgeLength(currGrid.x(), currGrid.y(), currGrid.z(), dir);
       }
     }
-    */
   }
   
   // tlength calculation
   auto currTLength = currGrid.getTLength();
   auto nextTLength = currTLength;
   // if there was a turn, then add tlength
-  // if (currTLength != std::numeric_limits<frCoord>::max()) {
-  //   nextTLength += getEdgeLength(currGrid.x(), currGrid.y(), currGrid.z(), dir);
-  // }
+  if (currTLength != INT_MAX) {
+    nextTLength += getEdgeLength(currGrid.x(), currGrid.y(), currGrid.z(), dir);
+  }
   // if current is a turn, then reset tlength
   if (currGrid.getLastDir() != frDirEnum::UNKNOWN && currGrid.getLastDir() != dir) {
     nextTLength = getEdgeLength(currGrid.x(), currGrid.y(), currGrid.z(), dir);
   }
   // if current is a via, then reset tlength
   if (dir == frDirEnum::U || dir == frDirEnum::D) {
-    // nextTLength = std::numeric_limits<frCoord>::max();
+    nextTLength = INT_MAX;
   }
 
   cuWavefrontGrid nextWavefrontGrid(gridX, gridY, gridZ, 
@@ -933,7 +938,6 @@ __device__ cuWavefrontGrid expand(cuWavefrontGrid &dest,  cuWavefrontGrid &currG
                                       nextTLength,
                                       currDist,
                                       nextPathCost, nextPathCost + nextEstCost, currGrid.getBackTraceBuffer());
-  /*
   if (dir == frDirEnum::U || dir == frDirEnum::D) {
     nextWavefrontGrid.resetLayerPathArea();
     nextWavefrontGrid.resetLength();
@@ -949,6 +953,7 @@ __device__ cuWavefrontGrid expand(cuWavefrontGrid &dest,  cuWavefrontGrid &currG
   // non-buffer enablement is faster for ripup all
   // commit grid prev direction if needed
   auto tailIdx = getTailIdx(nextIdx, nextWavefrontGrid);
+  /*
   if (tailDir != frDirEnum::UNKNOWN) {
     if (getPrevAstarNodeDir(tailIdx.x(), tailIdx.y(), tailIdx.z()) == frDirEnum::UNKNOWN ||
         getPrevAstarNodeDir(tailIdx.x(), tailIdx.y(), tailIdx.z()) == tailDir) {
@@ -996,6 +1001,10 @@ __global__ void dtest_estcost(frCost *res, FlexMazeIdx src,
 __global__ void test_isex(bool *res, int x, int y, int z, frDirEnum dir, 
     frDirEnum lastdir) {
   *res = isExpandable(x, y, z, dir, lastdir);
+}
+
+__global__ void test_halfviaenc(frCoord *res, frMIdx z, bool isLayer1) {
+  *res = getHalfViaEncArea(z, isLayer1);
 }
 
 __global__ void test_Dir(frDirEnum *res, int x, int y, int z) {
