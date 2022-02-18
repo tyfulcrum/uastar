@@ -327,6 +327,14 @@ inline __device__ frDirEnum getPrevAstarNodeDir(frMIdx x, frMIdx y, frMIdx z) {
       ((unsigned short)(d_prevDirs[baseIdx + 2]) << 0));
 }
 
+inline __device__ void setPrevAstarNodeDir(
+    frMIdx x, frMIdx y, frMIdx z, frDirEnum dir) {
+  auto baseIdx = 3 * getIdx(x, y, z);
+  d_prevDirs[baseIdx]     = ((unsigned short)dir >> 2) & 1;
+  d_prevDirs[baseIdx + 1] = ((unsigned short)dir >> 1) & 1;
+  d_prevDirs[baseIdx + 2] = ((unsigned short)dir     ) & 1;
+}
+
 __global__ void hasEdge_test(bool *res, int x, int y, int z, frDirEnum dir) {
   *res = hasEdge(x, y, z, dir);
 }
@@ -953,21 +961,19 @@ __device__ cuWavefrontGrid expand(cuWavefrontGrid &dest,  cuWavefrontGrid &currG
   // non-buffer enablement is faster for ripup all
   // commit grid prev direction if needed
   auto tailIdx = getTailIdx(nextIdx, nextWavefrontGrid);
-  /*
   if (tailDir != frDirEnum::UNKNOWN) {
     if (getPrevAstarNodeDir(tailIdx.x(), tailIdx.y(), tailIdx.z()) == frDirEnum::UNKNOWN ||
         getPrevAstarNodeDir(tailIdx.x(), tailIdx.y(), tailIdx.z()) == tailDir) {
       setPrevAstarNodeDir(tailIdx.x(), tailIdx.y(), tailIdx.z(), tailDir);
       // TODO: wavefront.push(nextWavefrontGrid);
       if (enableOutput) {
-        std::cout << "    commit (" << tailIdx.x() << ", " << tailIdx.y() << ", " << tailIdx.z() << ") prev accessing dir = " << (int)tailDir << "\n";
+        // std::cout << "    commit (" << tailIdx.x() << ", " << tailIdx.y() << ", " << tailIdx.z() << ") prev accessing dir = " << (int)tailDir << "\n";
       }
     }
   } else {  
     // TODO:  add to wavefront
     // wavefront.push(nextWavefrontGrid);
   }
-  */
 
   return nextWavefrontGrid;
 }
